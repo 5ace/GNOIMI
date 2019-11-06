@@ -14,6 +14,7 @@
 #include <limits>
 
 #include <cblas.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C"{
@@ -21,7 +22,7 @@ extern "C"{
 
 #include <yael/binheap.h>
 #include <yael/vector.h>
-#include <yael/matrix.c>
+#include <yael/matrix.h>
 
 int fvecs_read(const char *fname, int d, int n, float *v);
 int ivecs_new_read (const char *fname, int *d_out, int **vi);

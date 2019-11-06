@@ -11,6 +11,7 @@
 #include <vector>
 #include <ctime>
 #include <chrono>
+#include <string.h>
 
 #include <cblas.h>
 
@@ -20,7 +21,7 @@ extern "C"{
 
 #include <yael/kmeans.h>
 #include <yael/vector.h>
-#include <yael/matrix.c>
+#include <yael/matrix.h>
 
 int fvecs_read(const char *fname, int d, int n, float *v);
 int ivecs_new_read(const char *fname, int *d_out, int **vi);
