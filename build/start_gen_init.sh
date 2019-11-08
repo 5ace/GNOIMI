@@ -1,0 +1,1 @@
+nohup ./gen_init_data --train_file=sift1B/sift_learn.bvecs --n=200000 --d=128 --k=4096 --coarse_centriods_file=sift1B/gnoimi_train_data/coarse_centroids_init_d128_k4096.fvecs --residual_centriods_file=sift1B/gnoimi_train_data/fine_centroids_init_d128_k4096.fvecs &>log.init &

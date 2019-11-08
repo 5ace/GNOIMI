@@ -14,6 +14,11 @@
 #include <string.h>
 
 #include <cblas.h>
+#include "tool/utils.h"
+#include <faiss/Clustering.h>
+#include <faiss/IndexFlat.h>
+#include <faiss/utils/distances.h>
+#include <gflags/gflags.h>
 
 #ifdef __cplusplus
 extern "C"{
@@ -46,43 +51,57 @@ using std::ios;
 using std::string;
 using std::vector;
 
-int D = 96;
-int K = 256;
-int totalLearnCount = 1000000;
-int learnIterationsCount = 10;
-int L = 8;
-string learnFilename = "./deep10M.fvecs";
-string initCoarseFilename = "./coarse.fvecs";
-string initFineFilename = "./fine.fvecs";
-string outputFilesPrefix = "./test_";
-int trainThreadChunkSize = 10000;
-int threadsCount = 25;
-int* coarseAssigns = (int*)malloc(totalLearnCount * sizeof(int));
-int* fineAssigns = (int*)malloc(totalLearnCount * sizeof(int));
-float* alphaNum = (float*)malloc(K * K * sizeof(float));
-float* alphaDen = (float*)malloc(K * K * sizeof(float));
-float* alpha = (float*)malloc(K * K * sizeof(float));
+DEFINE_int32(thread_num,10,"train S,T, alpha thread num");
+DEFINE_int32(k,4096,"coarse and residual centriods num");
+DEFINE_int32(d,128,"feature dim");
+DEFINE_int32(n,1000000,"learn feature num, each thread_num train n/thread_num");
+DEFINE_int32(learnIterationsCount,10,"learnIterationsCount");
+DEFINE_int32(l,8,"");
+DEFINE_string(initCoarseFilename,"","initCoarseFilename fvecs, centorids of coarse");
+DEFINE_string(initFineFilename,"","initFineFilename fvecs, centorids of residual");
+DEFINE_string(learnFilename,"","learnFilename fvecs or bvecs, must normlized");
+DEFINE_string(outputFilesPrefix,"./train_gnoimi_","prefix of output file name");
+DEFINE_int32(trainThreadChunkSize,10000,"trainThreadChunkSize");
 
-vector<float*> alphaNumerators(threadsCount);
-vector<float*> alphaDenominators(threadsCount);
+size_t D;
+int K;
+size_t totalLearnCount;
+int learnIterationsCount;
+int L;
+string learnFilename; 
+string initCoarseFilename;
+string initFineFilename;
+string outputFilesPrefix;
+int trainThreadChunkSize;
+int threadsCount;
 
-float* coarseVocab = (float*)malloc(D * K * sizeof(float));
-float* fineVocab = (float*)malloc(D * K * sizeof(float));
-float* fineVocabNum = (float*)malloc(D * K * sizeof(float));
-float* fineVocabDen = (float*)malloc(K * sizeof(float));
-float* coarseVocabNum = (float*)malloc(D * K * sizeof(float));
-float* coarseVocabDen = (float*)malloc(K * sizeof(float));
+float* train_vecs;
+int* coarseAssigns;
+int* fineAssigns;
+float* alphaNum;
+float* alphaDen;
+float* alpha;
 
-vector<float*> fineVocabNumerators(threadsCount);
-vector<float*> fineVocabDenominators(threadsCount);
-vector<float*> coarseVocabNumerators(threadsCount);
-vector<float*> coarseVocabDenominators(threadsCount);
+vector<float*> alphaNumerators;
+vector<float*> alphaDenominators;
 
-float* coarseNorms = (float*)malloc(K * sizeof(float));
-float* fineNorms = (float*)malloc(K * sizeof(float));
-float* coarseFineProducts = (float*)malloc(K * K * sizeof(float));
+float* coarseVocab;
+float* fineVocab;
+float* fineVocabNum;
+float* fineVocabDen;
+float* coarseVocabNum;
+float* coarseVocabDen;
 
-float* errors = (float*)malloc(threadsCount * sizeof(float));
+vector<float*> fineVocabNumerators;
+vector<float*> fineVocabDenominators;
+vector<float*> coarseVocabNumerators;
+vector<float*> coarseVocabDenominators;
+
+float* coarseNorms;
+float* fineNorms;
+float* coarseFineProducts;
+
+float* errors;
 
 ///////////////////////////
 void computeOptimalAssignsSubset(int threadId) {
@@ -92,18 +111,22 @@ void computeOptimalAssignsSubset(int threadId) {
   float* pointsCoarseTerms = (float*)malloc(trainThreadChunkSize * K * sizeof(float));
   float* pointsFineTerms = (float*)malloc(trainThreadChunkSize * K * sizeof(float));
   errors[threadId] = 0.0;
-  FILE* learnStream = fopen(learnFilename.c_str(), "r");
-  fseek(learnStream, startId * (D + 1) * sizeof(float), SEEK_SET);
-  float* chunkPoints = (float*)malloc(trainThreadChunkSize * D * sizeof(float));
+
+  float* chunkPoints = train_vecs + startId * D;
   std::vector<std::pair<float, int> > coarseScores(K);
-  for(int chunkId = 0; chunkId < chunksCount; ++chunkId) {
-    std::cout << "[Assigns][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount << "\n";
-    fvecs_fread(learnStream, chunkPoints, trainThreadChunkSize, D);
+  for(int chunkId = 0; chunkId < chunksCount; ++chunkId,chunkPoints += trainThreadChunkSize * D) {
+    LOG(INFO) << "[Assigns][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount;
+    LOG(INFO) << "train vec Squared L2 norm " << faiss::fvec_norm_L2sqr(chunkPoints,D);
+    // 与查询的过程一致，|p-S-alpha*T| 
+    // 索引这里预计算p*S和p*T
     fmat_mul_full(coarseVocab, chunkPoints, K, trainThreadChunkSize, D, "TN", pointsCoarseTerms);
     fmat_mul_full(fineVocab, chunkPoints, K, trainThreadChunkSize, D, "TN", pointsFineTerms);
     for(int pointId = 0; pointId < trainThreadChunkSize; ++pointId) {
+      // 这里想计算|p-S|
+      // 转换为 p*p/2-P*S +S*S,由于对于同一个p,p*p/2=0.5是一样的所以排序时排除即可
       cblas_saxpy(K, -1.0, coarseNorms, 1, pointsCoarseTerms + pointId * K, 1);
       for(int k = 0; k < K; ++k) {
+        // 这first就是每个查询向量与所有一级类中心的近似距离,S*S/2-p*S
         coarseScores[k].first = (-1.0) * pointsCoarseTerms[pointId * K + k];
         coarseScores[k].second = k;
       }
@@ -117,6 +140,7 @@ void computeOptimalAssignsSubset(int threadId) {
         float currentCoarseTerm = coarseScores[l].first;
         for(int currentFineId = 0; currentFineId < K; ++currentFineId) {
           float alphaFactor = alpha[currentCoarseId * K + currentFineId];
+          // score = |p - T - alpha*T|
           float score = currentCoarseTerm + alphaFactor * coarseFineProducts[currentCoarseId * K + currentFineId] + 
                         (-1.0) * alphaFactor * pointsFineTerms[pointId * K + currentFineId] + 
                         alphaFactor * alphaFactor * fineNorms[currentFineId];
@@ -127,13 +151,12 @@ void computeOptimalAssignsSubset(int threadId) {
           }
         }
       }
+      //保留每个训练向量的一级码本，二级码本以及与此码本的欧氏距离
       coarseAssigns[startId + chunkId * trainThreadChunkSize + pointId] = currentMinCoarseId;
       fineAssigns[startId + chunkId * trainThreadChunkSize + pointId] = currentMinFineId;
       errors[threadId] += currentMinScore * 2 + 1.0; // point has a norm equals 1.0
     }
   }
-  fclose(learnStream);
-  free(chunkPoints);
   free(pointsCoarseTerms);
   free(pointsFineTerms);
 }
@@ -144,13 +167,10 @@ void computeOptimalAlphaSubset(int threadId) {
   long long startId = (totalLearnCount / threadsCount) * threadId;
   int pointsCount = totalLearnCount / threadsCount;
   int chunksCount = pointsCount / trainThreadChunkSize;
-  FILE* learnStream = fopen(learnFilename.c_str(), "r");
-  fseek(learnStream, startId * (D + 1) * sizeof(float), SEEK_SET);
   float* residual = (float*)malloc(D * sizeof(float));
-  float* chunkPoints = (float*)malloc(trainThreadChunkSize * D * sizeof(float));
-  for(int chunkId = 0; chunkId < chunksCount; ++chunkId) {
+  float* chunkPoints = train_vecs + startId * D;
+  for(int chunkId = 0; chunkId < chunksCount; ++chunkId,chunkPoints += trainThreadChunkSize * D) {
     std::cout << "[Alpha][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount << "\n";
-    fvecs_fread(learnStream, chunkPoints, trainThreadChunkSize, D);
     for(int pointId = 0; pointId < trainThreadChunkSize; ++pointId) {
       int coarseAssign = coarseAssigns[startId + chunkId * trainThreadChunkSize + pointId];
       int fineAssign = fineAssigns[startId + chunkId * trainThreadChunkSize + pointId];
@@ -161,8 +181,6 @@ void computeOptimalAlphaSubset(int threadId) {
       alphaDenominators[threadId][coarseAssign * K + fineAssign] += fineNorms[fineAssign] * 2; // we keep halves of norms 
     }
   }
-  fclose(learnStream);
-  free(chunkPoints);
   free(residual);
 }
 
@@ -172,13 +190,10 @@ void computeOptimalFineVocabSubset(int threadId) {
   long long startId = (totalLearnCount / threadsCount) * threadId;
   int pointsCount = totalLearnCount / threadsCount;
   int chunksCount = pointsCount / trainThreadChunkSize;
-  FILE* learnStream = fopen(learnFilename.c_str(), "r");
-  fseek(learnStream, startId * (D + 1) * sizeof(float), SEEK_SET);
   float* residual = (float*)malloc(D * sizeof(float));
-  float* chunkPoints = (float*)malloc(trainThreadChunkSize * D * sizeof(float));
-  for(int chunkId = 0; chunkId < chunksCount; ++chunkId) {
+  float* chunkPoints = train_vecs + startId * D;
+  for(int chunkId = 0; chunkId < chunksCount; ++chunkId,chunkPoints += trainThreadChunkSize * D) {
     std::cout << "[Fine vocabs][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount << "\n";
-    fvecs_fread(learnStream, chunkPoints, trainThreadChunkSize, D);
     for(int pointId = 0; pointId < trainThreadChunkSize; ++pointId) {
       int coarseAssign = coarseAssigns[startId + chunkId * trainThreadChunkSize + pointId];
       int fineAssign = fineAssigns[startId + chunkId * trainThreadChunkSize + pointId];
@@ -189,8 +204,6 @@ void computeOptimalFineVocabSubset(int threadId) {
       fineVocabDenominators[threadId][fineAssign] += alphaFactor * alphaFactor;
     }
   }
-  fclose(learnStream);
-  free(chunkPoints);
   free(residual);
 }
 
@@ -200,13 +213,10 @@ void computeOptimalCoarseVocabSubset(int threadId) {
   long long startId = (totalLearnCount / threadsCount) * threadId;
   int pointsCount = totalLearnCount / threadsCount;
   int chunksCount = pointsCount / trainThreadChunkSize;
-  FILE* learnStream = fopen(learnFilename.c_str(), "r");
-  fseek(learnStream, startId * (D + 1) * sizeof(float), SEEK_SET);
   float* residual = (float*)malloc(D * sizeof(float));
-  float* chunkPoints = (float*)malloc(trainThreadChunkSize * D * sizeof(float));
-  for(int chunkId = 0; chunkId < chunksCount; ++chunkId) {
-    std::cout << "[Coarse vocabs][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount << "\n";
-    fvecs_fread(learnStream, chunkPoints, trainThreadChunkSize, D);
+  float* chunkPoints = train_vecs + startId * D;
+  for(int chunkId = 0; chunkId < chunksCount; ++chunkId,chunkPoints += trainThreadChunkSize * D) {
+    std::cout << "[Coarse vocabs][Thread " << threadId << "] " << "processing chunk " <<  chunkId << " of " << chunksCount;
     for(int pointId = 0; pointId < trainThreadChunkSize; ++pointId) {
       int coarseAssign = coarseAssigns[startId + chunkId * trainThreadChunkSize + pointId];
       int fineAssign = fineAssigns[startId + chunkId * trainThreadChunkSize + pointId];
@@ -217,12 +227,58 @@ void computeOptimalCoarseVocabSubset(int threadId) {
       coarseVocabDenominators[threadId][coarseAssign] += 1.0;
     }
   }
-  fclose(learnStream);
-  free(chunkPoints);
   free(residual);
 }
+void init_global_varibles() {
 
-int main() {
+    D = FLAGS_d;
+    K = FLAGS_k;
+    totalLearnCount = FLAGS_n;
+    learnIterationsCount = FLAGS_learnIterationsCount;
+    L = FLAGS_l;
+    learnFilename = FLAGS_learnFilename; 
+    initCoarseFilename = FLAGS_initCoarseFilename;
+    initFineFilename = FLAGS_initFineFilename;
+    outputFilesPrefix = FLAGS_outputFilesPrefix;
+    trainThreadChunkSize = FLAGS_trainThreadChunkSize;
+    threadsCount = FLAGS_thread_num;
+
+    coarseAssigns = (int*)malloc(totalLearnCount * sizeof(int));
+    fineAssigns = (int*)malloc(totalLearnCount * sizeof(int));
+    alphaNum = (float*)malloc(K * K * sizeof(float));
+    alphaDen = (float*)malloc(K * K * sizeof(float));
+    alpha = (float*)malloc(K * K * sizeof(float));
+    
+    alphaNumerators.resize(threadsCount);
+    alphaDenominators.resize(threadsCount);
+    
+    coarseVocab = (float*)malloc(D * K * sizeof(float));
+    fineVocab = (float*)malloc(D * K * sizeof(float));
+    fineVocabNum = (float*)malloc(D * K * sizeof(float));
+    fineVocabDen = (float*)malloc(K * sizeof(float));
+    coarseVocabNum = (float*)malloc(D * K * sizeof(float));
+    coarseVocabDen = (float*)malloc(K * sizeof(float));
+    
+    fineVocabNumerators.resize(threadsCount);
+    fineVocabDenominators.resize(threadsCount);
+    coarseVocabNumerators.resize(threadsCount);
+    coarseVocabDenominators.resize(threadsCount);
+    
+    coarseNorms = (float*)malloc(K * sizeof(float));
+    fineNorms = (float*)malloc(K * sizeof(float));
+    coarseFineProducts = (float*)malloc(K * K * sizeof(float));
+    
+    errors = (float*)malloc(threadsCount * sizeof(float));
+}
+int main(int argc, char** argv) {
+    ::google::InitGoogleLogging(argv[0]);
+    ::gflags::ParseCommandLineFlags(&argc, &argv, true);
+    //初始化全局变量 =====
+    FLAGS_logtostderr = true; //日志全部输出到标准错误
+    init_global_varibles();
+    std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount); 
+    train_vecs = features.get();
+
   for(int threadId = 0; threadId < threadsCount; ++threadId) {
     alphaNumerators[threadId] = (float*)malloc(K * K * sizeof(float*));
     alphaDenominators[threadId] = (float*)malloc(K * K * sizeof(float*));
@@ -235,6 +291,10 @@ int main() {
     coarseVocabNumerators[threadId] = (float*)malloc(K * D * sizeof(float));
     coarseVocabDenominators[threadId] = (float*)malloc(K * sizeof(float));
   }
+  LOG(INFO) << initCoarseFilename << " "<< initFineFilename << " " <<
+      learnFilename << " " << outputFilesPrefix;
+
+  CHECK(!initCoarseFilename.empty() && !initFineFilename.empty() && !learnFilename.empty() && !outputFilesPrefix.empty());
   // init vocabs
   fvecs_read(initCoarseFilename.c_str(), D, K, coarseVocab);
   fvecs_read(initFineFilename.c_str(), D, K, fineVocab);
@@ -245,11 +305,15 @@ int main() {
   // learn iterations
   std::cout << "Start learning iterations...\n";
   for(int it = 0; it < learnIterationsCount; ++it) {
+    //计算每个类中心的内积,用于计算距离使用
     for(int k = 0; k < K; ++k) {
       coarseNorms[k] = cblas_sdot(D, coarseVocab + k * D, 1, coarseVocab + k * D, 1) / 2;
       fineNorms[k] = cblas_sdot(D, fineVocab + k * D, 1, fineVocab + k * D, 1) / 2;
     }
+    //矩阵相乘 coarseFineProducts=fineVocab*transpose(coarseVocab) 得到K*K的矩阵
     fmat_mul_full(fineVocab, coarseVocab, K, K, D, "TN", coarseFineProducts);
+    // https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Babenko_Efficient_Indexing_of_CVPR_2016_paper.pdf
+    // 见这里迭代 优化4个参数
     // update Assigns
     vector<std::thread> workers;
     memset(errors, 0, threadsCount * sizeof(float));
@@ -263,9 +327,11 @@ int main() {
     for(int threadId = 0; threadId < threadsCount; ++threadId) {
       totalError += errors[threadId];
     }
-    std::cout << "Current reconstruction error... " << totalError / totalLearnCount << "\n";
+    LOG(INFO) << "Current reconstruction error... " << totalError / totalLearnCount << "\n";
+
     workers.clear();
     // update alpha
+    LOG(INFO) << "update alpha";
     for(int threadId = 0; threadId < threadsCount; ++threadId) {
       workers.push_back(std::thread(computeOptimalAlphaSubset, threadId));
     }
@@ -282,6 +348,7 @@ int main() {
     for(int i = 0; i < K * K; ++i) {
       alpha[i] = (alphaDen[i] == 0) ? 1.0 : alphaNum[i] / alphaDen[i];
     }
+    LOG(INFO) << "update fine Vocabs";
     // update fine Vocabs
     for(int threadId = 0; threadId < threadsCount; ++threadId) {
       workers.push_back(std::thread(computeOptimalFineVocabSubset, threadId));
@@ -299,6 +366,7 @@ int main() {
     for(int i = 0; i < K * D; ++i) {
       fineVocab[i] = (fineVocabDen[i / D] == 0) ? 0 : fineVocabNum[i] / fineVocabDen[i / D];
     }
+    LOG(INFO) << "update coarse Vocabs";
     // update coarse Vocabs
     for(int threadId = 0; threadId < threadsCount; ++threadId) {
       workers.push_back(std::thread(computeOptimalCoarseVocabSubset, threadId));
@@ -317,21 +385,12 @@ int main() {
       coarseVocab[i] = (coarseVocabDen[i / D] == 0) ? 0 : coarseVocabNum[i] / coarseVocabDen[i / D];
     }
     // save current alpha and vocabs
-    std::stringstream alphaFilename;
-    alphaFilename << outputFilesPrefix << "alpha_" << it << ".dat";
-    std::ofstream outAlpha(alphaFilename.str().c_str(), ios::binary | ios::out);
-    outAlpha.write((char*)alpha, K * K * sizeof(float));
-    outAlpha.close();
-    std::stringstream fineVocabFilename;
-    fineVocabFilename << outputFilesPrefix << "fine_" << it << ".dat";
-    std::ofstream outFine(fineVocabFilename.str().c_str(), ios::binary | ios::out);
-    outFine.write((char*)fineVocab, K * D * sizeof(float));
-    outFine.close();
-    std::stringstream coarseVocabFilename;
-    coarseVocabFilename << outputFilesPrefix << "coarse_" << it << ".dat";
-    std::ofstream outCoarse(coarseVocabFilename.str().c_str(), ios::binary | ios::out);
-    outCoarse.write((char*)coarseVocab, K * D * sizeof(float));
-    outCoarse.close();
+    string alphaFilename = outputFilesPrefix +"alpha_" + std::to_string(it) + ".fvecs";
+    gnoimi::fvecs_write(alphaFilename.c_str(),K,K,alpha);
+    string fineVocabFilename = outputFilesPrefix + "fine_" + std::to_string(it) + ".fvecs";
+    gnoimi::fvecs_write(fineVocabFilename.c_str(),D,K,fineVocab);
+    string coarseVocabFilename = outputFilesPrefix + "coarse_" + std::to_string(it) + ".fvecs";
+    gnoimi::fvecs_write(coarseVocabFilename.c_str(),D,K,coarseVocab);
   }
   free(coarseAssigns);
   free(fineAssigns);

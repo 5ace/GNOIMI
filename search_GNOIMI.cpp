@@ -50,12 +50,12 @@ using std::vector;
 
 const int D = 96;
 const int K = 16384;
-const int M = 8;
-const int rerankK = 256;
+const int M = 8; // 倒排链上pq的分段个数
+const int rerankK = 256; // 倒排链上pq的类中心个数,每个粗类中心单独训练一个最终倒排链码本
 const int N = 1000000000;
 const int queriesCount = 10000;
-const int L = 32;
-const int neighborsCount = 5000;
+const int L = 32; // query时一级码本的剪枝保留个数
+const int neighborsCount = 5000; //每次查询最多遍历doc的数目
 const int threadsCount = 29;
 
 string coarseCodebookFilename = "./deep1B_coarse.fvecs";
@@ -64,8 +64,8 @@ string alphaFilename = "./deep1B_alpha.fvecs";
 string indexFilename = "./deep1B_index.dat";
 string rerankCodesFilename = "./codes_deep1B_8.dat";
 string rerankRotationFilename = "./deep1B_rerankVocabsRotation8.fvecs";
-string rerankVocabsFilename = "./deep1B_rerankVocabs_8.fvecs";
-string cellEdgesFilename = "./deep1B_cellEdges.dat";
+string rerankVocabsFilename = "./deep1B_rerankVocabs_8.fvecs"; //倒排链上pq的类中心
+string cellEdgesFilename = "./deep1B_cellEdges.dat"; //记录每个倒排链在数组中的起始位置，用于定位倒排在Record*中的位置
 string queryFilename = "./deep1B_queries.fvecs";
 string groundFilename = "./deep1B_groundtruth.ivecs";
 
@@ -150,11 +150,13 @@ void ReadAndPrecomputeVocabsData(Searcher& searcher) {
   searcher.rerankRotation = (float*) malloc(D * D * sizeof(float));
   fvecs_read(rerankRotationFilename.c_str(), D, D, searcher.rerankRotation);
   float* temp = (float*) malloc(K * D * sizeof(float));
+  // 旋转1级码本,searcher.coarseVocab  
   fmat_mul_full(searcher.rerankRotation, searcher.coarseVocab,
                 D, K, D, "TN", temp);
   memcpy(searcher.coarseVocab, temp, K * D * sizeof(float));
   free(temp);
   temp = (float*) malloc(K * D * sizeof(float));
+  // 旋转2级码本
   fmat_mul_full(searcher.rerankRotation, searcher.fineVocab,
                 D, K, D, "TN", temp);
   memcpy(searcher.fineVocab, temp, K * D * sizeof(float));
@@ -162,17 +164,20 @@ void ReadAndPrecomputeVocabsData(Searcher& searcher) {
   searcher.coarseNorms = (float*) malloc(K * sizeof(float));
   searcher.fineNorms = (float*) malloc(K * sizeof(float));
   for(int i = 0; i < K; ++i) {
+    // 计算类中心的模得的平方/2,用于后续计算距离
     searcher.coarseNorms[i] = fvec_norm2sqr(searcher.coarseVocab + D * i, D) / 2;
     searcher.fineNorms[i] = fvec_norm2sqr(searcher.fineVocab + D * i, D) / 2;
   }
   temp = (float*) malloc(K * K * sizeof(float));
   fmat_mul_full(searcher.coarseVocab, searcher.fineVocab,
                 K, K, D, "TN", temp);
+  // 计算searcher.coarseFineProducts 以及和二级码本的内积就是文章中的Sk*Tl
   searcher.coarseFineProducts = fmat_new_transp(temp, K, K);
   free(temp);
   int Dread;
   cout << "Before allocation...\n";
   searcher.index = (Record*) malloc(N * sizeof(Record));
+  // 多线程读入id和编码信息到Record* index中
   LoadIndex(indexFilename, rerankCodesFilename, N, searcher.index);
   searcher.cellEdges = (int*) malloc(K * K * sizeof(int));
   LoadCellEdges(cellEdgesFilename, N, searcher.cellEdges);
@@ -205,10 +210,12 @@ void SearchNearestNeighbors(const Searcher& searcher,
   for(int qid = 0; qid < queriesCount; ++qid) {
     cout << qid << "\n";
     int found = 0;
+    // 计算query和各个类中心的内积，用于计算query和一级类中心的距离
     fmat_mul_full(searcher.coarseVocab, queries + qid * D,
                   K, 1, D, "TN", &(queryCoarseDistance[0]));
     fmat_mul_full(searcher.fineVocab, queries + qid * D,
                   K, 1, D, "TN", &(queryFineDistance[0]));
+    // 计算query和一级类中心的距离,|x-y|/2=x^2/2-x*y+y^2/2;y^2/2都一样就不要了，作比较没用
     for(int c = 0; c < K; ++c) {
       coarseList[c].first = searcher.coarseNorms[c] - queryCoarseDistance[c];
       coarseList[c].second = c;
@@ -220,12 +227,15 @@ void SearchNearestNeighbors(const Searcher& searcher,
       for(int k = 0; k < K; ++k) {
         int cellId = coarseId * K + k;
         float alphaFactor = searcher.alpha[cellId];
+        // 见公式
         scores[l*K+k].first = coarseList[l].first + searcher.fineNorms[k] * alphaFactor * alphaFactor
                               - queryFineDistance[k] * alphaFactor + searcher.coarseFineProducts[cellId] * alphaFactor;
         scores[l*K+k].second = cellId;
       }
       memcpy(searcher.coarseResiduals + l * D, searcher.coarseVocab + D * coarseId, D * sizeof(float));
+      // 记录一级码本的残差
       fvec_rev_sub(searcher.coarseResiduals + l * D, queries + qid * D, D);
+      // 拷贝rerankVocabs
       memcpy(preallocatedVocabs + l * rerankK * D, searcher.rerankVocabs + coarseId * rerankK * D, rerankK * D * sizeof(float));
     }
     int cellsCount = neighborsCount * ((float)K * K / N);
@@ -235,6 +245,7 @@ void SearchNearestNeighbors(const Searcher& searcher,
     int cellTraversed = 0;
     while(found < neighborsCount) {
       cellTraversed += 1;
+      //得到一级和二级码本
       int cellId = scores[currentPointer].second;
       int topListId = coarseIdToTopId[cellId / K];
       ++currentPointer;
@@ -245,6 +256,7 @@ void SearchNearestNeighbors(const Searcher& searcher,
       }
       memcpy(residual, searcher.coarseResiduals + topListId * D, D * sizeof(float));
       cblas_saxpy(D, -1.0 * searcher.alpha[cellId], searcher.fineVocab + (cellId % K) * D, 1, residual, 1);
+      // 计算 residual = p - S - a* T,即query在此倒排链的残差 公式(4)
       float* cellVocab = preallocatedVocabs + topListId * rerankK * D;
       for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
         result[qid][found].second = searcher.index[id].pointId;
@@ -254,6 +266,7 @@ void SearchNearestNeighbors(const Searcher& searcher,
           float* codeword = cellVocab + m * rerankK * subDim + searcher.index[id].bytes[m] * subDim;
           float* residualSubvector = residual + m * subDim;
           for(int d = 0; d < subDim; ++d) {
+            // 实时计算查询向量和对应编码类中心的距离
             diff = residualSubvector[d] - codeword[d];
             result[qid][found].first += diff * diff;
           }
@@ -304,8 +317,10 @@ int main() {
   Searcher searcher;
   ReadAndPrecomputeVocabsData(searcher);
   float* queries = (float*) malloc(queriesCount * D * sizeof(float));
+  // 读取query
   fvecs_read(queryFilename.c_str(), D, queriesCount, queries);
   float* temp = (float*) malloc(queriesCount * D * sizeof(float));
+  // 旋转一下,应该是一级OPQ
   fmat_mul_full(searcher.rerankRotation, queries,
                 D, queriesCount, D, "TN", temp);
   memcpy(queries, temp, queriesCount * D * sizeof(float));
