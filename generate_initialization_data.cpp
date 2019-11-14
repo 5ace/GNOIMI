@@ -25,6 +25,7 @@ using namespace gnoimi;
 /* ----------------------------------------------------------------------------*/
 DEFINE_int32(k,256,"default k means num");
 DEFINE_int32(d,128,"vector dim");
+DEFINE_int32(M,16,"opq 's sub vec num");
 DEFINE_int32(thread_num,10,"train kmeans thread num");
 DEFINE_int32(n,200000,"train kmeans vec num");
 DEFINE_string(train_file,"","train file name, .bvecs or .fvecs");
@@ -53,13 +54,11 @@ int main(int argc, char** argv) {
     CHECK(!f_file_list.empty() && !coarseFile_name.empty() && !fineFile_name.empty() && k > 0 && d>=0 && n>=0);
     
     // read train vectors
-    std::shared_ptr<float> features = read_bfvecs(f_file_list, d,  n); 
+    std::shared_ptr<float> features = read_bfvecs(f_file_list, d,  n, true); 
 
     LOG(INFO) << " load " << n << " vecs from " << f_file_list << " dim " << d;
     LOG(INFO) << "train vec Squared L2 norm " << faiss::fvec_norm_L2sqr(features.get(),d);
-    LOG(INFO) << "train vec Squared L2 norm " << faiss::fvec_norm_L2sqr(features.get()+d,d);
-
-
+    
     std::unique_ptr<float> coarse_centroids(new float[d*k]);
     std::unique_ptr<float> residual_centroids(new float[d*k]);
     std::unique_ptr<faiss::Index::idx_t> closest_id(new faiss::Index::idx_t[n]);

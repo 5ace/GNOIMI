@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 2.6)
 
 find_package(LAPACK)
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -std=c++0x -m64 -lpthread -lopenblas -lgomp -lgflags")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -std=c++0x -m64 -lpthread -lopenblas -lgomp -lgflags -fopenmp")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -std=c++0x -m64")
 
 SET(YAEL_DIR ${CMAKE_SOURCE_DIR}/../yael_v438)
@@ -39,3 +39,11 @@ TARGET_LINK_LIBRARIES (searchGNOIMI yael ${LAPACK_LIBRARIES} libfaiss.a libglog.
 ADD_EXECUTABLE (gen_init_data generate_initialization_data.cpp)
 TARGET_LINK_LIBRARIES (gen_init_data yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
 #########################################################################################
+ADD_EXECUTABLE (gen_groudth gen_groudth.cpp)
+TARGET_LINK_LIBRARIES (gen_groudth yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (print_fvecs print_fvecs.cpp)
+TARGET_LINK_LIBRARIES (print_fvecs yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (train_opq train_opq.cpp)
+TARGET_LINK_LIBRARIES (train_opq yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )

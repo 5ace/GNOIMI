@@ -35,7 +35,8 @@ extern "C"{
 #include <yael/kmeans.h>
 #include <yael/vector.h>
 #include <yael/matrix.h>
-
+#include <yael/binheap.h>
+long fvecs_fread (FILE * f, float * v, long n, int d_alloc);
 int fvecs_read(const char *fname, int d, int n, float *v);
 int ivecs_new_read(const char *fname, int *d_out, int **vi);
 void fmat_mul_full(const float *left, const float *right,
@@ -52,14 +53,28 @@ float kmeans (int d, int n, int k, int niter,
         const float * v, int flags, long seed, int redo, 
         float * centroids, float * dis, 
         int * assign, int * nassign);
+float* fmat_new_transp (const float *a, int ncol, int nrow);
+struct fbinheap_s * fbinheap_new (int maxk);
+int ivecs_new_read (const char *fname, int *d_out, int **vi);
 #ifdef __cplusplus
 }
 #endif
 
 
 namespace gnoimi {
-using Call_back = std::function<void(size_t n, const float *x)>;
-
+inline bool end_with (const std::string& a, const std::string& b) {
+  return a.size()>=b.size() && a.compare(a.size()-b.size(),b.size(),b) == 0;
+}
+using Call_back = std::function<void(size_t n, float *x, size_t start_id)>;
+inline size_t file_size (const char* fname) {
+    FILE *f = fopen(fname, "r");
+    if(!f) {
+      return 0;
+    }
+    struct stat st;
+    fstat(fileno(f), &st);
+    return st.st_size;
+}
 float * fvecs_read (const char *fname,
                     size_t *d_out, size_t *n_out)
 {
@@ -79,7 +94,14 @@ float * fvecs_read (const char *fname,
     assert(sz % ((d + 1) * 4) == 0 || !"weird file size");
     size_t n = sz / ((d + 1) * 4);
 
-    *d_out = d; *n_out = n;
+    if( *d_out == 0) {
+       *d_out = d;
+    }
+    if(*n_out == 0) {
+       *n_out = n;
+    }
+    assert(*d_out == d);
+    assert(*n_out <= n);
     float *x = new float[n * (d + 1)];
     size_t nr = fread(x, sizeof(float), n * (d + 1), f);
     assert(nr == n * (d + 1) || !"could not read whole file");
@@ -205,19 +227,32 @@ int fvec_fwrite (FILE *fo, const float *v, int d)
                         }  
               return 0;
 }
+long ivecs_fread (FILE * f, int * v, long n);
 
 int b2fvecs_read_callback (const char *fname, size_t &d, size_t &n, size_t each_loop_num,
-                              Call_back call_back) {
+                              Call_back call_back, bool normalized = true) {
     size_t n_new;
     size_t d_new;
-    bvecs_fsize (fname, &d_new, &n_new);
+    bool is_fvecs = false;
+
+    if(end_with(fname,".fvecs")) {
+      is_fvecs = true;
+      xvecs_fsize (sizeof(float), fname, &d_new, &n_new);
+    } else if(end_with(fname,".bvecs")){
+      xvecs_fsize (sizeof(char), fname, &d_new, &n_new);
+    } else {
+      CHECK(false) << " file "<<fname << ",format wrong";
+    }
+    LOG(INFO) << "b2fvecs_read_callback file "<< fname <<",format:" 
+      << (is_fvecs ? "fevc" : "bvec") << ", in file d:" << d_new
+      << ",file has doc:"<<n_new <<",want read docnum:" << n;
+
     if(d==0) {
       d = d_new;
     }
     if(n==0) {
       n = n_new;
     }
-    printf("file:%s,d:%ld,num:%ld,want_read:%ld\n",fname,d_new,n_new,n);
     assert (d_new == d);
     assert (n <= n_new);
     float* v = new float[d * each_loop_num];
@@ -225,14 +260,23 @@ int b2fvecs_read_callback (const char *fname, size_t &d, size_t &n, size_t each_
     assert (f || "b2fvecs_read: Unable to open the file");
     size_t left = n;
     size_t each_loop = each_loop_num;
+    size_t start_id = 0;
     while(left!=0) {
       if(left < each_loop_num) {
         each_loop = left;
       }
-      printf("b2fvecs_read_callback: left:%ld,loop_num:%ld\n",left,each_loop);
-      b2fvecs_fread(f, v, each_loop);
-      call_back(each_loop,v);
+      LOG(INFO) << "b2fvecs_read_callback: left" << left <<",loop_num:" << each_loop;
+      if(is_fvecs) {
+        fvecs_fread(f, v, each_loop, (int)d);
+      }else {
+        b2fvecs_fread(f, v, each_loop);
+      }
+      if(normalized) {
+        faiss::fvec_renorm_L2(d,each_loop,v);
+      }
+      call_back(each_loop,v,start_id);
       left -= each_loop;
+      start_id += each_loop;
     }
     fclose (f);
     delete[] v;
@@ -266,23 +310,36 @@ double elapsed ()
     gettimeofday (&tv, nullptr);
     return  tv.tv_sec + tv.tv_usec * 1e-6;
 }
-
-inline std::shared_ptr<float> read_bfvecs(std::string file, size_t &d, size_t& n, bool normalized = true) {
-  auto end_with = [](std::string a,std::string b) {return a.size()>=b.size() && a.compare(a.size()-b.size(),b.size(),b);};
+inline std::shared_ptr<float> read_bfvecs(std::string file, size_t &d, size_t& n, bool normalized) {
   float *p =nullptr;
-  if(end_with(file,".bvec")) {
+  if(end_with(file,".bvecs")) {
     LOG(INFO) << " read .bvec " << file;
     p = b2fvecs_read(file.c_str(), d, n);
-  }else if(end_with(file,".fvec")) {
-    LOG(INFO) << " read .fvec " << file;
+  }else if(end_with(file,".fvecs") || end_with(file,".ivecs")) {
+    LOG(INFO) << " read .fvec or ivecs" << file;
     p = fvecs_read(file.c_str(), &d, &n);
   }
   CHECK(p!=nullptr) << " not want format .bvec or .fvec";
   if(normalized) {
+    LOG(INFO) << "xxxxxxx" << d << n;
     faiss::fvec_renorm_L2(d,n,p);
   }
   return std::shared_ptr<float>(p);
 
+}
+// not very clean, but works as long as sizeof(int) == sizeof(float)
+std::shared_ptr<int> ivecs_read(const char *fname, size_t *d_out, size_t *n_out)
+{
+    return std::shared_ptr<int>((int*)fvecs_read(fname, d_out, n_out));
+}
+void print_elements (char* start, size_t n) {
+  std::stringstream ss;
+  ss << "[";
+  for(size_t i = 0; i < n; i++) {
+    ss << (int)start[i] << (i==n-1 ? "":",");
+  }
+  ss<<"]";
+  LOG(INFO) << ss.str();
 }
 template<typename T>
 void print_elements(const T* start, size_t n) {
