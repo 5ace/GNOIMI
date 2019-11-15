@@ -97,7 +97,7 @@ struct Searcher {
     rerankRotationFilename = model_prefix_ + "opq_matrix.fvecs";
     rerankVocabsFilename = model_prefix_ + "pq.fvecs";
     rerankPQFaissFilename = model_prefix_ + "pq.faiss.index";
-    rerankPQFaissWithDataFilename = index_prefix_ + "pq.faiss.index";
+    rerankPQFaissWithDataFilename = index_prefix_ + "pq.faiss.withdata.index";
     cellEdgesFilename = index_prefix_+ "cellEdges.dat";
     rawIndexFilename = index_prefix_+ "rawIndex.dat"; //作者设计的格式
     // 加载模型数据
@@ -157,6 +157,7 @@ struct Searcher {
     CHECK(pq_with_data == nullptr && access(rerankPQFaissWithDataFilename.c_str(),0) == 0);
     LOG(INFO) << "start load Faiss PQ with data" << rerankPQFaissWithDataFilename;
     pq_with_data = dynamic_cast<faiss::IndexPQ*>(faiss::read_index(rerankPQFaissWithDataFilename.c_str()));
+    pq_with_data->pq.compute_sdc_table();
     return pq_with_data != nullptr;
   }
   // prepare for search index
@@ -655,7 +656,7 @@ int main(int argc, char** argv) {
     }
     CHECK(!access(FLAGS_groud_truth_file.c_str(),0)  && !access(FLAGS_query_filename.c_str(),0));
     searcher.LoadIndex();
-    searcher.LoadPQWithData();
+    //searcher.LoadPQWithData();
     size_t queriesCount = FLAGS_queriesCount;
     // 读取query
     auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,true);
