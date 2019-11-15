@@ -313,29 +313,54 @@ struct Searcher {
   };
   // 不能多线程调用
   void AddIndex(int L, size_t n, float *x, size_t start_id) {
-    vector<int> cellids;
-    vector<float> residuals;
+    static vector<vector<int>> cellids;
+    static vector<vector<float>> residuals;
     int nprobe = 1;
     if(start_id == 0) {
         LOG(INFO) << "======ori id 0";
         gnoimi::print_elements(x,D);
     }
-    SearchIvf(n, x, L, nprobe, cellids, residuals);  
+    int loopN = 2000;
+    int loopNum = (n + loopN - 1)/loopN;
+    cellids.resize(loopNum);
+    residuals.resize(loopNum);
 
-    pq->add(n,residuals.data());
-    for(int i = 0; i<n;i++) {
-      //LOG(INFO) << "AddIndex doc:" << start_id + i << ",add to cell:" << cellids[i*nprobe];
-      if(start_id + i< 99) {
-        vector<uint8_t> code(pq->pq.code_size); 
-        pq->pq.compute_codes(residuals.data()+i*nprobe*D,code.data(),1);
-        LOG(INFO) << "=====codeinfo add index docid:" << start_id + i<<",size:"<<pq->pq.code_size;
-        gnoimi::print_elements(residuals.data()+i*nprobe*D,D);
-        gnoimi::print_elements((char*)code.data(),M);
-      }
+    #pragma omp parallel for num_threads(FLAGS_threadsCount)
+    for(size_t i = 0; i < loopNum; ++i) {
+      int tmp_n = (i==loopNum-1) ? n - (loopNum-1) * loopN : loopN;
+      //LOG(INFO) << "loopN " << i * loopN * D << ",loopNum:"<<loopNum<<",n:"<< n <<",start_id:"<<start_id <<",tmp_n:"<<tmp_n;
+      SearchIvf(tmp_n, x + i * loopN * D, L, nprobe, cellids[i], residuals[i]);  
     }
-    for(auto cellid:cellids) {
-      ivf[cellid].push_back(start_id++);    
-    }
+   
+    auto t1 = std::thread( [this,start_id]() {
+        size_t id = start_id;
+        for(auto & loop_cell : cellids) {
+          for(auto cellid : loop_cell) {
+            ivf[cellid].push_back(id++);
+          }
+        }
+    });
+    auto t2 = std::thread( [this]() {
+        for(auto & loop_residual : residuals) {
+          pq->add(loop_residual.size()/D,loop_residual.data());
+        }
+    } );
+    t1.join();
+    t2.join();
+    //pq->add(n,residuals.data());
+    //for(auto cellid:cellids) {
+    //  ivf[cellid].push_back(start_id++);    
+    //}
+    //for(int i = 0; i < n; i++) {
+    //  //LOG(INFO) << "AddIndex doc:" << start_id + i << ",add to cell:" << cellids[i*nprobe];
+    //  if(start_id + i< 99) {
+    //    vector<uint8_t> code(pq->pq.code_size); 
+    //    pq->pq.compute_codes(residuals.data()+i*nprobe*D,code.data(),1);
+    //    LOG(INFO) << "=====codeinfo add index docid:" << start_id + i<<",size:"<<pq->pq.code_size;
+    //    gnoimi::print_elements(residuals.data()+i*nprobe*D,D);
+    //    gnoimi::print_elements((char*)code.data(),M);
+    //  }
+    //}
   }
   bool SearchIvf(size_t queriesCount, float *queries, size_t L, int &nprobe, vector<int> &cellids,vector<float> &residuals) {
     if(nprobe > L * K || nprobe <= 0) {
@@ -648,8 +673,14 @@ int main(int argc, char** argv) {
       CHECK(searcher.LoadPQ());
       LOG(INFO) << "start indexing";
       size_t read_num = FLAGS_N;
+      if(read_num > 0) {
+        //预申请空间
+        for(auto & i:searcher.ivf){
+          i.reserve((read_num+1000000)/(searcher.K*searcher.K));
+        }
+      }
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
-         searcher.D, read_num, 10000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
+         searcher.D, read_num, 100000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
          std::placeholders::_2, std::placeholders::_3));
       LOG(INFO) << "end index,read " << read_num << ",want " << FLAGS_N;
       searcher.SaveIndex();
