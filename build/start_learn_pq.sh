@@ -4,5 +4,6 @@
 
 
 #训练残差opq
-./learnGNOIMI --n=1000000 --train_opq=true --direct_train_s_t_alpha=true --train_pq=true --thread_num=50 --k=4096 --learnIterationsCount=30 --outputFilesPrefix=sift1B/gnoimi_train_data/learn_from_yael_k4096_residual_opq_ --initCoarseFilename=./sift1B/gnoimi_train_data/coarse_centroids_init_d128_k4096_residual_opq_yael.fvecs --initFineFilename=./sift1B/gnoimi_train_data/fine_centroids_init_d128_k4096_residual_opq_yael.fvecs --learnFilename=./sift1B/sift_learn.bvecs &>log.learn_yael_opq_k4096_residual_opq
+#./learnGNOIMI --n=1000000 --train_opq=true --direct_train_s_t_alpha=true --train_pq=true --thread_num=50 --k=4096 --learnIterationsCount=30 --outputFilesPrefix=sift1B/gnoimi_train_data/learn_from_yael_k4096_residual_opq_ --initCoarseFilename=./sift1B/gnoimi_train_data/coarse_centroids_init_d128_k4096_residual_opq_yael.fvecs --initFineFilename=./sift1B/gnoimi_train_data/fine_centroids_init_d128_k4096_residual_opq_yael.fvecs --learnFilename=./sift1B/sift_learn.bvecs &>log.learn_yael_opq_k4096_residual_opq.sift1b
 
+#./learnGNOIMI --n=1000000 --train_opq=true --direct_train_s_t_alpha=true --train_pq=true --thread_num=50 --k=4096 --learnIterationsCount=30 --outputFilesPrefix=mmu0.5b/learn_from_yael_k4096_residual_opq_ --initCoarseFilename=./mmu0.5b/coarse_centroids_init_d128_k4096_residual_opq_yael.fvecs --initFineFilename=./mmu0.5b/fine_centroids_init_d128_k4096_residual_opq_yael.fvecs --learnFilename=mmu0.5b/mmu0.5b_learn.198w.fvecs &>log.learn_yael_opq_k4096_residual_opq_mmu0.5b

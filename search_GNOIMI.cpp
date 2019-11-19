@@ -320,9 +320,8 @@ struct Searcher {
   void AddIndex(int L, uint64_t n, float *x, uint64_t start_id) {
     static vector<vector<int>> cellids;
     static vector<vector<float>> residuals;
-    int nprobe = 1;
     if(start_id == 0) {
-        LOG(INFO) << "======ori id 0";
+        LOG(INFO) << "======ori id 0, L:" << L << ",n:" << n <<",D:" << D;
         gnoimi::print_elements(x,D);
     }
     int loopN = 10000;
@@ -330,10 +329,11 @@ struct Searcher {
     cellids.resize(loopNum);
     residuals.resize(loopNum);
 
-    #pragma omp parallel for num_threads(FLAGS_threadsCount)
+    int nprobe = 1;
+    #pragma omp parallel for if(FLAGS_threadsCount > 1)  num_threads(FLAGS_threadsCount)
     for(uint64_t i = 0; i < loopNum; ++i) {
       int tmp_n = (i==loopNum-1) ? n - (loopNum-1) * loopN : loopN;
-      //LOG(INFO) << "loopN " << i * loopN * D << ",loopNum:"<<loopNum<<",n:"<< n <<",start_id:"<<start_id <<",tmp_n:"<<tmp_n;
+      LOG(INFO) << "loopN " << i * loopN * D << ",loopNum:"<<loopNum<<",n:"<< n <<",start_id:"<<start_id <<",tmp_n:"<<tmp_n;
       SearchIvf(tmp_n, x + i * loopN * D, L, nprobe, cellids[i], residuals[i]);  
     }
    
@@ -391,7 +391,6 @@ struct Searcher {
     }
     residuals.resize(queriesCount * nprobe * D);
     cellids.resize(queriesCount * nprobe);
-    //LOG(INFO) << nprobe << ",residuals size:" << residuals.size()*4;
     int subDim = D / M;
     std::clock_t c_start = std::clock();
     double t0 = elapsed();
@@ -473,11 +472,12 @@ struct Searcher {
       int recall_doclist_num = 0;
       int recall_doc_num = 0;
       for(int travesered_list_num = 0; travesered_list_num < nprobe; ++travesered_list_num) {
+        
         //得到cellid
         int cellId = scores[travesered_list_num].second;
-        int last = (cellId == 0 ? 0 : cellEdges[cellId-1]);
 
         if(is_index == false) {
+          int last = (cellId == 0 ? 0 : cellEdges[cellId-1]);
           //是query情形
           if(recall_doc_num >= neighborsCount) {
             break;

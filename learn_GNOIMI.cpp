@@ -223,12 +223,9 @@ void computeOptimalCoarseVocabSubset(int threadId) {
   free(residual);
 }
 void init_global_varibles() {
-    D = FLAGS_d;
     K = FLAGS_k;
-    totalLearnCount = FLAGS_n;
     learnIterationsCount = FLAGS_learnIterationsCount;
     L = FLAGS_l;
-    learnFilename = FLAGS_learnFilename; 
     initCoarseFilename = FLAGS_initCoarseFilename;
     initFineFilename = FLAGS_initFineFilename;
     outputFilesPrefix = FLAGS_outputFilesPrefix;
@@ -236,8 +233,9 @@ void init_global_varibles() {
     threadsCount = FLAGS_thread_num;
 
     //这里因为原作者的设计多线程和每次矩阵相乘大小的要求totalLearnCount需规整一下
+    int totalLearnCount_t = totalLearnCount;
     totalLearnCount = totalLearnCount/threadsCount/trainThreadChunkSize*trainThreadChunkSize*threadsCount;
-    LOG(INFO) << "totalLearnCount(FLAGS_n) change from " << FLAGS_n <<" to " << totalLearnCount;
+    LOG(INFO) << "totalLearnCount(FLAGS_n) change from " << totalLearnCount_t <<" to " << totalLearnCount;
     residual_vecs = (float*)malloc(totalLearnCount * D * sizeof(float));
     coarseAssigns = (int*)malloc(totalLearnCount * sizeof(int));
     fineAssigns = (int*)malloc(totalLearnCount * sizeof(int));
@@ -439,9 +437,13 @@ int main(int argc, char** argv) {
     ::gflags::ParseCommandLineFlags(&argc, &argv, true);
     // 初始化全局变量 =====
     FLAGS_logtostderr = true; //日志全部输出到标准错误
+
+    learnFilename = FLAGS_learnFilename; 
+    D = FLAGS_d;
+    totalLearnCount = FLAGS_n;
+    std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount, true); 
     init_global_varibles();
     // 读取训练向量
-    std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount, true); 
     train_vecs = features.get();
 
     LOG(INFO) << initCoarseFilename << " "<< initFineFilename << " " <<

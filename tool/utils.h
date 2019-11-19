@@ -265,7 +265,7 @@ int b2fvecs_read_callback (const char *fname, size_t &d, size_t &n, size_t each_
       if(left < each_loop_num) {
         each_loop = left;
       }
-      LOG(INFO) << "b2fvecs_read_callback: left" << left <<",loop_num:" << each_loop;
+      LOG(INFO) << "b2fvecs_read_callback: left:" << left <<",loop_num:" << each_loop;
       if(is_fvecs) {
         fvecs_fread(f, v, each_loop, (int)d);
       }else {
