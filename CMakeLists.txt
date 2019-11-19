@@ -47,3 +47,6 @@ TARGET_LINK_LIBRARIES (print_fvecs yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a
 #########################################################################################
 ADD_EXECUTABLE (train_opq train_opq.cpp)
 TARGET_LINK_LIBRARIES (train_opq yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (faiss_search_index faiss_search_index.cpp)
+TARGET_LINK_LIBRARIES (faiss_search_index yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )

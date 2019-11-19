@@ -75,8 +75,9 @@ int main(int argc, char** argv) {
     } else {
       error = kmeans(d,n,k,FLAGS_iter_num,features.get(),FLAGS_thread_num,1234,1,coarse_centroids.get(),closest_dis.get(),
         closest_id_int.get(),nassign.get());  
-      LOG(INFO) << "yael:closest_id =====";
-      gnoimi::print_elements(closest_id_int.get(),100);
+      for(int i = 0; i < k; i++) {
+        LOG(INFO) << "coarse kmeans k "<< i <<" mean num:" << nassign.get()[i];
+      }
     }
     LOG(INFO) << "coarse kmean, use yael:" <<FLAGS_use_yael << ",error:" << error;
     std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
@@ -107,8 +108,9 @@ int main(int argc, char** argv) {
     } else {
       error = kmeans(d,n,k,FLAGS_iter_num,residuals.get(),FLAGS_thread_num,1234,1,residual_centroids.get(),closest_dis.get(),
         closest_id_int.get(),nassign.get());  
-      LOG(INFO) << "yael:closest_id =====";
-      gnoimi::print_elements(closest_id_int.get(),100);
+      for(int i = 0; i < k; i++) {
+        LOG(INFO) << "residual kmeans k "<< i <<" mean num:" << nassign.get()[i];
+      }
     }
     std::chrono::steady_clock::time_point end1 = std::chrono::steady_clock::now();
     LOG(INFO) << "Coarse Kmean time difference = " << std::chrono::duration_cast<std::chrono::microseconds>(end1 - begin1).count();

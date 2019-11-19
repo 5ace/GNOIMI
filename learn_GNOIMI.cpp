@@ -44,6 +44,8 @@ DEFINE_string(outputFilesPrefix,"./train_gnoimi_","prefix of output file name");
 DEFINE_int32(trainThreadChunkSize,10000,"the dim num for yael fmat_mul_full ");
 DEFINE_bool(direct_train_s_t_alpha,false,"false = alreay train coarse fine and alpha, and read them from file");
 DEFINE_bool(train_pq,true,"is train pq");
+DEFINE_bool(train_opq,true,"分2种情况1.跟faiss一样用原始向量训练opq；2.用残差训练opq、用残差*opq训练pq；这里设置true就是方法2用残差训练opq");
+DEFINE_bool(train_lopq,true,"每个一级倒排链单独训练一个pq和opq旋转矩阵,faiss每个kmeans最少需要40*k=10240,4000个倒排链最好是5000w训练数据，每个倒排链分配1万多个训练数据");
 
 size_t D;
 int K;
@@ -92,6 +94,7 @@ string fineVocabFilename;
 string coarseVocabFilename;
 string pqFileName;
 string pqIndexFileName;
+string opq_matrix_file;
 
 ///////////////////////////
 void computeOptimalAssignsSubset(int threadId) {
@@ -279,6 +282,7 @@ void init_global_varibles() {
     coarseVocabFilename = outputFilesPrefix + "coarse.fvecs";
     pqFileName = outputFilesPrefix + "pq.fvecs";
     pqIndexFileName = outputFilesPrefix + "pq.faiss.index";
+    opq_matrix_file = outputFilesPrefix + "opq_matrix.fvecs";
 }
 void update_precompute() {
       //计算每个类中心的内积,用于计算距离使用
@@ -462,23 +466,34 @@ int main(int argc, char** argv) {
     update_residuls();
 
 
+    if(FLAGS_train_opq) {
+      LOG(INFO) << "train opq start ==== ";
+      faiss::OPQMatrix opq(D,FLAGS_M);
+      opq.verbose = true;
+      opq.train(totalLearnCount,residual_vecs);
+      fvecs_write(opq_matrix_file.c_str(),D,D,opq.A.data());
+      LOG(INFO) << "train opq finish ==== ";
 
-    //LOG(INFO) << "calc R*Residual start";
-    //// 旋转残差
-    //LOG(INFO) << "========residual[0] =======";
-    //gnoimi::print_elements(residual_vecs,D);
-    //#pragma omp parallel for num_threads(threadsCount)
-    //for(int i = 0 ; i< totalLearnCount; i+=trainThreadChunkSize) {
-    //  int num = (totalLearnCount < i + trainThreadChunkSize) ? totalLearnCount - i : trainThreadChunkSize;
-    //  LOG(INFO) << "i:" << i <<",num:"<<num<<",A:"<<opq.A.size() <<",D:"<<D;
-    //  float * r = new float[num*D];
-    //  fmat_mul_full(opq.A.data(), residual_vecs + i * D, D, num, D, "TN", r);
-    //  memcpy(residual_vecs + i * D,r,sizeof(float)*num*D);
-    //  delete[] r;
-    //}
-    //LOG(INFO) << "========R*residual[0] =======";
-    //gnoimi::print_elements(residual_vecs,D);
-    //LOG(INFO) << "calc R*Residual end";
+      LOG(INFO) << "calc R*Residual start";
+      // 旋转残差
+      gnoimi::print_elements(residual_vecs,D);
+      float * r = new float[totalLearnCount * D];
+      fmat_mul_full(opq.A.data(), residual_vecs, D, totalLearnCount, D, "TN", r);
+      memcpy(residual_vecs,r,sizeof(float)*totalLearnCount*D);
+      delete[] r;
+      //#pragma omp parallel for num_threads(threadsCount)
+      //for(int i = 0 ; i< totalLearnCount; i+=trainThreadChunkSize) {
+      //  int num = (totalLearnCount < i + trainThreadChunkSize) ? totalLearnCount - i : trainThreadChunkSize;
+      //  LOG(INFO) << "i:" << i <<",num:"<<num<<",A:"<<opq.A.size() <<",D:"<<D;
+      //  float * r = new float[num*D];
+      //  fmat_mul_full(opq.A.data(), residual_vecs + i * D, D, num, D, "TN", r);
+      //  memcpy(residual_vecs + i * D,r,sizeof(float)*num*D);
+      //  delete[] r;
+      //}
+      LOG(INFO) << "========R*residual[0] =======";
+      gnoimi::print_elements(residual_vecs,D);
+      LOG(INFO) << "calc R*Residual end";
+    }
 
     //开始训练PQ
     LOG(INFO) << "train PQ start";

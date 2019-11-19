@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <functional>
 #include <vector>
 #include <ctime>
@@ -30,6 +31,7 @@ using std::cout;
 using std::ios;
 using std::string;
 using std::vector;
+using namespace gnoimi;
 
 DEFINE_string(groud_truth_file,"","format ivec");
 DEFINE_string(query_filename,"","format fvec");
@@ -37,7 +39,7 @@ DEFINE_bool(make_index,true,"制作index还是查询index, true:only make index,
 DEFINE_string(model_prefix,"./train_gnoimi_","prefix of model files");
 DEFINE_string(index_prefix,"./index_gnoimi_","prefix of index files");
 DEFINE_string(base_file,"","file content vectors to index,format:bvecs or fvecs");
-DEFINE_int32(K,4096,"coarse and residual centriods num");
+DEFINE_uint64(K,4096,"coarse and residual centriods num");
 DEFINE_uint64(D,128,"feature dim");
 DEFINE_int32(M,16,"PQ's subvector num");
 DEFINE_uint64(N,1000000000,"index vectors num");
@@ -47,6 +49,14 @@ DEFINE_int32(threadsCount,10,"thread num");
 DEFINE_int32(nprobe,200," if not in (0,K*L] else  set K*L");
 DEFINE_int32(neighborsCount,5000,"coarse search num for GNOIMI");
 DEFINE_int32(queriesCount,0,"load query count");
+DEFINE_bool(residual_opq,false,"是否是对残差的opq");
+DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
+
+
+std::vector<int> grouth_cellid;
+int gt_in_LK = 0; // gt在 L个倒排链中的query个数
+int gt_in_retrievaled = 0; // gt被遍历过的query 个数
+
 const int M = 16;
 struct Record {
   int pointId;
@@ -61,12 +71,13 @@ struct Searcher {
   float* alpha;
   float* coarseFineProducts;
   Record* index;
+  uint64_t docnum;
   int* cellEdges; //cellEdges[0] 表示第一个倒排链的END，第二个倒排链的开头
   float* rerankRotation;
   float* rerankVocabs;
   string model_prefix_,index_prefix_;
-  size_t D;
-  int K;
+  uint64_t D;
+  uint64_t K;
   int M;
   int subDim;
   int rerankK;
@@ -79,7 +90,7 @@ struct Searcher {
   string fineCodebookFilename;
   string alphaFilename, rerankRotationFilename, rerankVocabsFilename, cellEdgesFilename,rawIndexFilename,rerankPQFaissFilename,rerankPQFaissWithDataFilename;
 
-  Searcher(string model_prefix,string index_prefix,int D,int K, int M, int rerankK,int threadsCount) {
+  Searcher(string model_prefix,string index_prefix,uint64_t D,uint64_t K, int M, int rerankK,int threadsCount) {
     pq = nullptr;
     pq_with_data = nullptr;
     index = nullptr;
@@ -131,7 +142,7 @@ struct Searcher {
     float variance = 0;
     float avg = cellEdges[K*K - 1]*1.0 / (K*K);
     for(int i = 0; i < K * K ; i++) {
-      LOG_IF(INFO,cellEdges[i] - last_cell != 0) << "LoadCellEdges cell:" << i << ",docnum:" <<cellEdges[i] - last_cell;
+      //LOG_IF(INFO,cellEdges[i] - last_cell != 0) << "LoadCellEdges cell:" << i << ",docnum:" <<cellEdges[i] - last_cell;
       //if(cellEdges[i] - last_cell != 0) {
       //  for(int j = 0; j < cellEdges[i] - last_cell; j++)
       //    LOG(INFO) << "=cell "<< i << ",contains:" << index[last_cell+j].pointId;
@@ -162,9 +173,9 @@ struct Searcher {
   }
   // prepare for search index
   bool LoadIndex() {
-    size_t fz = gnoimi::file_size(rawIndexFilename.c_str());
+    uint64_t fz = gnoimi::file_size(rawIndexFilename.c_str());
     CHECK(fz > 0 && fz % sizeof(Record) == 0) << " check file " << rawIndexFilename;
-    size_t docnum = fz / sizeof(Record);
+    docnum = fz / sizeof(Record);
     LOG(INFO) << "LoadIndex find " << docnum << " docs in " << rawIndexFilename;
     index = (Record*) malloc(docnum * sizeof(Record));
     // 多线程读入id和编码信息到Record* index中
@@ -188,18 +199,12 @@ struct Searcher {
     fvecs_read(alphaFilename.c_str(), K, K, alpha);
     rerankRotation = (float*) malloc(D * D * sizeof(float));
     fvecs_read(rerankRotationFilename.c_str(), D, D, rerankRotation);
-    //float* temp = (float*) malloc(K * D * sizeof(float));
-    //// 旋转1级码本,searcher.coarseVocab  
-    //fmat_mul_full(rerankRotation, coarseVocab,
-    //              D, K, D, "TN", temp);
-    //memcpy(coarseVocab, temp, K * D * sizeof(float));
-    //free(temp);
-    //temp = (float*) malloc(K * D * sizeof(float));
-    //// 旋转2级码本
-    //fmat_mul_full(rerankRotation, fineVocab,
-    //              D, K, D, "TN", temp);
-    //memcpy(fineVocab, temp, K * D * sizeof(float));
-    //free(temp);
+    //残差旋转r=q-s-alpha*t; Rr=R(q-s-alpha*t)
+    if(FLAGS_residual_opq == true) {
+      LOG(INFO) << "opq for coarseVocab and fineVocab";
+      OpqMatrix(coarseVocab, FLAGS_K);
+      OpqMatrix(fineVocab, FLAGS_K);
+    }
     coarseNorms = (float*) malloc(K * sizeof(float));
     fineNorms = (float*) malloc(K * sizeof(float));
     for(int i = 0; i < K; ++i) {
@@ -312,7 +317,7 @@ struct Searcher {
     return true;
   };
   // 不能多线程调用
-  void AddIndex(int L, size_t n, float *x, size_t start_id) {
+  void AddIndex(int L, uint64_t n, float *x, uint64_t start_id) {
     static vector<vector<int>> cellids;
     static vector<vector<float>> residuals;
     int nprobe = 1;
@@ -320,23 +325,26 @@ struct Searcher {
         LOG(INFO) << "======ori id 0";
         gnoimi::print_elements(x,D);
     }
-    int loopN = 2000;
+    int loopN = 10000;
     int loopNum = (n + loopN - 1)/loopN;
     cellids.resize(loopNum);
     residuals.resize(loopNum);
 
     #pragma omp parallel for num_threads(FLAGS_threadsCount)
-    for(size_t i = 0; i < loopNum; ++i) {
+    for(uint64_t i = 0; i < loopNum; ++i) {
       int tmp_n = (i==loopNum-1) ? n - (loopNum-1) * loopN : loopN;
       //LOG(INFO) << "loopN " << i * loopN * D << ",loopNum:"<<loopNum<<",n:"<< n <<",start_id:"<<start_id <<",tmp_n:"<<tmp_n;
       SearchIvf(tmp_n, x + i * loopN * D, L, nprobe, cellids[i], residuals[i]);  
     }
    
     auto t1 = std::thread( [this,start_id]() {
-        size_t id = start_id;
+        uint64_t id = start_id;
         for(auto & loop_cell : cellids) {
           for(auto cellid : loop_cell) {
-            ivf[cellid].push_back(id++);
+            ivf[cellid].push_back(id);
+            //LOG(INFO) << "[INDEX] doc " << id << ", add to cellid:" << cellid << "["
+            //  << cellid/FLAGS_K << "|" << cellid%FLAGS_K << "]";
+            ++id;
           }
         }
     });
@@ -362,7 +370,22 @@ struct Searcher {
     //  }
     //}
   }
-  bool SearchIvf(size_t queriesCount, float *queries, size_t L, int &nprobe, vector<int> &cellids,vector<float> &residuals) {
+  void OpqMatrix(float* x,uint64_t n){
+      thread_local vector<float> temp(n * D);
+      temp.resize( n * D);
+      
+      fmat_mul_full(rerankRotation, x,
+                    D, n , D, "TN", temp.data());
+      memcpy(x, temp.data(), n * D * sizeof(float));
+  }
+  /*
+    @param neighborsCount:为了减少无效残差计算传入查询想要的neighborsCount,
+      query 的时候空倒排链跳过，已计算倒排链的个数>=neighborsCount 停止计算
+    @residuals cellids 在query情况下，只返回倒排链不为空的cellid和其残差，并且达到neighborsCount之后不再计算,
+      即residuals cellids的size虽然是queriesCount * nprobe * D 和 queriesCount * nprobe,但实际有意义的只在前几个
+  */
+  bool SearchIvf(uint64_t queriesCount, float *queries, uint64_t L, int &nprobe, vector<int> &cellids,vector<float> &residuals, bool is_index = true,
+      uint64_t start_id = 0, uint64_t neighborsCount = 0xFFFFFFFFUL) {
     if(nprobe > L * K || nprobe <= 0) {
       nprobe = L * K;
     }
@@ -371,17 +394,21 @@ struct Searcher {
     //LOG(INFO) << nprobe << ",residuals size:" << residuals.size()*4;
     int subDim = D / M;
     std::clock_t c_start = std::clock();
-    //先OPQ
-    {
-      thread_local vector<float> temp(queriesCount * D);
-      temp.resize(queriesCount * D);
+    double t0 = elapsed();
+    OpqMatrix(queries, queriesCount);
+    double t1 = elapsed();
+    
+    double c1 = 0.0;
+    double c2 = 0.0;
+    double c3 = 0.0;
+    double c4 = 0.0;
+    double c5 = 0.0;
 
-      fmat_mul_full(rerankRotation, queries,
-                    D, queriesCount, D, "TN", temp.data());
-      memcpy(queries, temp.data(), queriesCount * D * sizeof(float));
-    }
+    double z1 = 0.0;
+    double z2 = 0.0;
 
     for(int qid = 0; qid < queriesCount; ++qid) {
+      double t0 = elapsed();
       float* query_residual = residuals.data() + qid * nprobe * D;
       int* candi_cell_id = cellids.data() + qid * nprobe;
     
@@ -405,11 +432,22 @@ struct Searcher {
         coarseList[c].first = coarseNorms[c] - queryCoarseDistance[c];
         coarseList[c].second = c;
       }
+      double t1 = elapsed();
+      c1 += (t1 - t0);
       std::partial_sort(coarseList.begin(),coarseList.begin() + L ,coarseList.end());
+      double t2 = elapsed();
+      c2 += (t2 - t1);
 
       for(int l = 0; l < L; ++l) {
         int coarseId = coarseList[l].second;
         coarseIdToTopId[coarseId] = l;
+        // 统计代码
+        if(grouth_cellid.size() != 0) {
+          if(grouth_cellid[start_id + qid]/K == coarseId) {
+              gt_in_LK++; 
+              LOG(INFO) << "GT CELL query:" << start_id + qid << ", hit corse cell:" << l;
+          }
+        } 
         for(int k = 0; k < K; ++k) {
           int cellId = coarseId * K + k;
           float alphaFactor = alpha[cellId];
@@ -424,39 +462,73 @@ struct Searcher {
         // 拷贝前L个倒排链的PQ的码本
         //memcpy(preallocatedVocabs + l * rerankK * D, searcher.rerankVocabs + coarseId * rerankK * D, rerankK * D * sizeof(float));
       }
+      double t3 = elapsed();
+      c3 += (t3 - t2);
       // 倒排链得分排序,取倒排链
-      std::partial_sort(scores.begin(), scores.begin() + nprobe, scores.end());
-      int travesered_list_num = 0;
+      std::partial_sort(scores.begin(), scores.begin() + nprobe, scores.end(),[](const std::pair<float, int> & a, const std::pair<float, int> & b) ->bool{return a.first < b.first;});
+      double t4 = elapsed();
+      c4 += (t4 - t3);
+
+      //实际返回倒排链的个数
+      int recall_doclist_num = 0;
+      int recall_doc_num = 0;
       for(int travesered_list_num = 0; travesered_list_num < nprobe; ++travesered_list_num) {
-        //得到一级和二级码本
+        //得到cellid
         int cellId = scores[travesered_list_num].second;
+        int last = (cellId == 0 ? 0 : cellEdges[cellId-1]);
+
+        if(is_index == false) {
+          //是query情形
+          if(recall_doc_num >= neighborsCount) {
+            break;
+          }
+          if(cellEdges[cellId] - last == 0) {
+            continue;
+          }
+          recall_doc_num += (cellEdges[cellId] - last);
+        }
+
         int topListId = coarseIdToTopId[cellId / K]; //得到这个cellid对应的粗排的顺序
         //拷贝p-S
-        memcpy(query_residual + travesered_list_num * D , coarseResiduals.data() + topListId * D, D * sizeof(float));
+        double t1 = elapsed();
+        memcpy(query_residual + recall_doclist_num * D , coarseResiduals.data() + topListId * D, D * sizeof(float));
+        double t2 = elapsed();
         //residual = p -S - alpha*T
-        cblas_saxpy(D, -1.0 * alpha[cellId], fineVocab + (cellId % K) * D, 1, query_residual + travesered_list_num * D, 1);
-        candi_cell_id[travesered_list_num] = cellId;
+        cblas_saxpy(D, -1.0 * alpha[cellId], fineVocab + (cellId % K) * D, 1, query_residual + recall_doclist_num * D, 1);
+        double t3 = elapsed();
+        z1 += (t2 - t1);
+        z2 += (t3 - t2);
+        candi_cell_id[recall_doclist_num] = cellId;
+        ++recall_doclist_num;
       }
+      double t5 = elapsed();
+      c5 += (t5 - t4);
     }
+    LOG(INFO) << " SearchIvf COST:[" << (t1-t0)*1e6/queriesCount <<","<< c1*1e6/queriesCount << ","<< c2*1e6/queriesCount
+      << "," << c3*1e6/queriesCount << "," << c4*1e6/queriesCount<<","<< c5*1e6/queriesCount<<"] us" << ",memcpy:" << z1*1e6/queriesCount << ","
+      << "saxpy:" << z2*1e6/queriesCount << ",nprobe:" << nprobe;
     return true;
   }
   void SearchNearestNeighbors(float* x,
-                              int n, int L, int neighborsCount, 
-                              vector<vector<std::pair<float, int> > >& result, size_t start_id) {
+                              int n, int L, int nprobe, int neighborsCount, 
+                              vector<vector<std::pair<float, int> > >& result, uint64_t start_id) {
     result.resize(n);
     //result查询结果每个query保存neighborsCount=5000个结果
     thread_local vector<int> cellids;
     thread_local vector<float> residuals;
-    LOG(INFO) << "query vec Squared L2 norm " << faiss::fvec_norm_L2sqr(x,D);
-    int nprobe = 0;
-    SearchIvf(n, x, L, nprobe, cellids, residuals);  
-    for(int i = 0; i < n; i++) {
-      LOG(INFO) << "QueryIndex doc:" << start_id + i << ",search to cell:" << cellids[i*nprobe] << ",nprobe:"<<nprobe;
-      if((start_id + i) % 10000 == 0) {
-        LOG(INFO) << "======query id:" << start_id + i << ",residual===";
-        gnoimi::print_elements(residuals.data()+i*nprobe*D,D);
-      }
-    }
+    // LOG(INFO) << "query vec Squared L2 norm " << faiss::fvec_norm_L2sqr(x,D);
+
+    // 根据neighborsCount预估需要遍历倒排链的个数主要是为了减少std::partial_sort(L*K)的时间
+    double t0 = elapsed();
+    SearchIvf(n, x, L, nprobe, cellids, residuals,false,start_id,neighborsCount);  
+    double t1 = elapsed();
+    //for(int i = 0; i < n; i++) {
+    //  LOG(INFO) << "QueryIndex doc:" << start_id + i << ",search to cell:" << cellids[i*nprobe] << ",nprobe:"<<nprobe;
+    //  if((start_id + i) % 10000 == 0) {
+    //    LOG(INFO) << "======query id:" << start_id + i << ",residual===";
+    //    gnoimi::print_elements(residuals.data()+i*nprobe*D,D);
+    //  }
+    //}
     std::clock_t c_start = std::clock();
     float* cellVocab = rerankVocabs;
     for(int qid = 0; qid < n; ++qid) {
@@ -472,10 +544,23 @@ struct Searcher {
           int cellId = candi_cell_id[i];
           int cellStart = (cellId == 0) ? 0 : cellEdges[cellId - 1];
           int cellFinish = cellEdges[cellId];
+
+          if(found >= neighborsCount) {
+              break;
+          }
+
           check_cell_num++;
+
           if(cellStart == cellFinish) {
             empty_cell_num++;
             continue;
+          }
+
+          if(grouth_cellid.size() != 0) {
+            if(grouth_cellid[start_id + qid] == cellId) {
+              gt_in_retrievaled++; 
+              LOG(INFO) << "GT CELL query:" << start_id + qid << ", hit retrieval cell:" << cellId;
+            }
           }
           float* cell_residual = query_residual + i * D;
           std::unique_ptr<faiss::DistanceComputer> dis_computer;
@@ -506,20 +591,17 @@ struct Searcher {
             }
             ++found;
           }
-          if(found >= neighborsCount) {
-            break;
-          }
         }
         std::sort(result[qid].begin(), result[qid].end());
-        //LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
-        //  << empty_cell_num << "found " << found;
+        LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
+          << empty_cell_num << " found " << found;
         for(int z = 0; z < 10 && z < result[qid].size();z++) {
-          LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second << ",score:"
+          LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second <<","<< ",score:"
           <<result[qid][z].first;
         }
     }
-    std::clock_t c_end = std::clock();
-    LOG(INFO) << "CPU time used: "<< 1000.0 * (c_end-c_start) / CLOCKS_PER_SEC / n<< " ms\n";
+    double t2 = elapsed();
+    LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1e6/n <<" us, pq cost:" << (t2-t1)*1e6/n << ",total:" << (t2-t0)*1e6/n;
 }
 };
 
@@ -626,29 +708,34 @@ void SearchNearestNeighbors_MultiPQ(const Searcher& searcher,
 #endif
 
 float computeRecallAt(const vector<vector<std::pair<float, int> > >& result,
-                      const int* groundtruth, int R) {
+                      const int* groundtruth, int R, uint64_t gt_d) {
   int limit = (R < result[0].size()) ? R : result[0].size();
   int positive = 0;
   for(int i = 0; i < result.size(); ++i) {
+    bool hit = false;
     for(int j = 0; j < limit; ++j) {
-      if(result[i][j].second == groundtruth[i]) {
+      if(result[i][j].second == *(groundtruth + i * gt_d)) {
         ++positive;
+        hit = true;
       }
+    }
+    if(!hit) {
+      LOG(INFO) << "[GT MISS] query " << i << ", want " << *(groundtruth + i * gt_d) << ", @" << limit;
     }
   }
   return (float(positive) / result.size());
 }
 void ComputeRecall(const vector<vector<std::pair<float, int> > >& result,
-                   const int* groundtruth) {
+                   const int* groundtruth, uint64_t gt_d) {
     int R = 1;
     std::cout << std::fixed << std::setprecision(5) << "Recall@ " << R << ": " << 
-                 computeRecallAt(result, groundtruth, R) << "\n";
+                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
     R = 10;
     std::cout << std::fixed << std::setprecision(5) << "Recall@ " << R << ": " << 
-                 computeRecallAt(result, groundtruth, R) << "\n";
+                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
     R = 100;
     std::cout << std::fixed << std::setprecision(5) << "Recall@ " << R << ": " << 
-                 computeRecallAt(result, groundtruth, R) << "\n";
+                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
 }
 
 int main(int argc, char** argv) {
@@ -664,6 +751,7 @@ int main(int argc, char** argv) {
     CHECK(FLAGS_rerankK == 256) << "rerankK must = 256";
     CHECK(FLAGS_L >= 0 && FLAGS_L <= FLAGS_K );
     LOG(INFO) << "sizeof Record " << sizeof(Record);
+
     // 初始化
     Searcher searcher(FLAGS_model_prefix,FLAGS_index_prefix,FLAGS_D,FLAGS_K,FLAGS_M,FLAGS_rerankK,FLAGS_threadsCount);
 
@@ -672,7 +760,7 @@ int main(int argc, char** argv) {
       CHECK(!FLAGS_base_file.empty()) << "need set file base_file";
       CHECK(searcher.LoadPQ());
       LOG(INFO) << "start indexing";
-      size_t read_num = FLAGS_N;
+      uint64_t read_num = FLAGS_N;
       if(read_num > 0) {
         //预申请空间
         for(auto & i:searcher.ivf){
@@ -680,7 +768,7 @@ int main(int argc, char** argv) {
         }
       }
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
-         searcher.D, read_num, 100000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
+         searcher.D, read_num, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
          std::placeholders::_2, std::placeholders::_3));
       LOG(INFO) << "end index,read " << read_num << ",want " << FLAGS_N;
       searcher.SaveIndex();
@@ -688,42 +776,73 @@ int main(int argc, char** argv) {
     CHECK(!access(FLAGS_groud_truth_file.c_str(),0)  && !access(FLAGS_query_filename.c_str(),0));
     searcher.LoadIndex();
     //searcher.LoadPQWithData();
-    size_t queriesCount = FLAGS_queriesCount;
+    uint64_t queriesCount = FLAGS_queriesCount;
     // 读取query
     auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,true);
     LOG(INFO) << "L2 norm " << faiss::fvec_norm_L2sqr(queries.get(), FLAGS_D);
     LOG(INFO) << "read "<< queriesCount <<" doc from " << FLAGS_query_filename << ", d:" << FLAGS_D;
-    //float * z = new float[FLAGS_D * FLAGS_D];
-    //fmat_mul_full(searcher.rerankRotation,searcher.rerankRotation,
-    //              FLAGS_D, FLAGS_D, FLAGS_D, "TN", z);
-    //gnoimi::print_elements(z,2*FLAGS_D);
+    {
+      float * z = new float[FLAGS_D * FLAGS_D];
+      fmat_mul_full(searcher.rerankRotation,searcher.rerankRotation,
+                  FLAGS_D, FLAGS_D, FLAGS_D, "TN", z);
+      gnoimi::print_elements(z,2*FLAGS_D);
+      delete[] z;
+    }
 
     LOG(INFO) << "========ori id:0 ";
     gnoimi::print_elements(queries.get(),FLAGS_D);
     float* temp = (float*) malloc(queriesCount * FLAGS_D * sizeof(float));
-    //// 旋转一下,应该是一级OPQ  ====> 改到搜索倒排链之前统一旋转
-    //fmat_mul_full(searcher.rerankRotation, queries.get(),
-    //              FLAGS_D, queriesCount, FLAGS_D, "TN", temp);
-    //memcpy(queries.get(), temp, queriesCount * FLAGS_D * sizeof(float));
-    //free(temp);  
+
+    // 读取groud truth
+    uint64_t gt_d = 0;
+    uint64_t gt_num = queriesCount;
+    auto groundtruth = gnoimi::ivecs_read(FLAGS_groud_truth_file.c_str(),&gt_d,&gt_num);
+    LOG(INFO) << "Groundtruth is read";
+    CHECK(gt_d > 0);
+    // 统计grouth truth 所在的cellid
+    std::unordered_map<int,int> gts_cellid;
+    if(FLAGS_print_gt_in_LK){
+      FLAGS_threadsCount = 1;
+      grouth_cellid.resize(queriesCount,-1); //记录每个groudth在哪个cell当中  
+      for(int i = 0; i< queriesCount; i++) {
+        gts_cellid.insert({groundtruth.get()[gt_d * i],-1}); 
+      }
+      int last_cell = 0;
+      for(int i = 0; i < FLAGS_K * FLAGS_K ; i++) {
+        if(searcher.cellEdges[i] - last_cell != 0) {
+          for(int j = last_cell; j < searcher.cellEdges[i]; j++) {
+            auto it = gts_cellid.find(searcher.index[j].pointId);
+            if(it != gts_cellid.end()) {
+              it->second = i;
+            }
+          }
+        }
+        last_cell = searcher.cellEdges[i];
+      }
+      for(int i = 0; i< queriesCount; i++) {
+        grouth_cellid[i] = gts_cellid[groundtruth.get()[gt_d * i]];
+        LOG(INFO) << "FIND GT CELL query " << i << ", gt:" << groundtruth.get()[gt_d * i] << ", in cell:" << grouth_cellid[i];
+      }
+    }
+    
+    // query
     vector<vector<std::pair<float, int> > > results(queriesCount);
+    double t0 = elapsed();
+    int nprobe = (FLAGS_neighborsCount * FLAGS_K * FLAGS_K)/ searcher.docnum + 100;
     #pragma omp parallel for num_threads(FLAGS_threadsCount)
-    for(size_t i = 0 ; i<queriesCount; i++) {
+    for(uint64_t i = 0 ; i< queriesCount; i++) {
       vector<vector<std::pair<float, int> > > result;
-      searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L,FLAGS_neighborsCount, result, i);
+      searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i);
       results[i]  = result[0];
       LOG(INFO) << "query finish " << i << ", result:" << result[0][0].second;
     }
-    //SearchNearestNeighbors(searcher,queries, neighborsCount, result);
-    LOG(INFO) << "Before reading groundtruth...";
-    size_t gt_d = 1;
-    size_t gt_num = queriesCount;
-    auto groundtruth = gnoimi::ivecs_read(FLAGS_groud_truth_file.c_str(),&gt_d,&gt_num);
-    for(int i =0;i<gt_num; i++) {
-      LOG(INFO) << "=======gt"<< i <<"========";
-      gnoimi::print_elements(groundtruth.get()+i,gt_d);
+    double t1 = elapsed();
+
+    ComputeRecall(results, groundtruth.get(),gt_d); 
+    LOG(INFO) << "[COST] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe;
+    if(FLAGS_print_gt_in_LK) {
+      LOG(INFO) << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << gt_in_LK << " " << gt_in_LK*1.0/queriesCount
+        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << ",top:"<< FLAGS_neighborsCount;
     }
-    LOG(INFO) << "Groundtruth is read";
-    ComputeRecall(results, groundtruth.get()); 
     return 0;
 }
