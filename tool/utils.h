@@ -101,7 +101,7 @@ float * fvecs_read (const char *fname,
        *n_out = n;
     }
     assert(*d_out == d);
-    assert(*n_out <= n);
+    CHECK(*n_out <= n) << "*n_out:"<< *n_out <<",n:"<<n<< ",file:"<<fname;
     float *x = new float[n * (d + 1)];
     size_t nr = fread(x, sizeof(float), n * (d + 1), f);
     assert(nr == n * (d + 1) || !"could not read whole file");

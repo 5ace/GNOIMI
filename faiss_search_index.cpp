@@ -24,6 +24,7 @@
 #include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexIVF.h>
 #include <faiss/IndexPQ.h>
+#include <faiss/IndexHNSW.h>
 #include <faiss/index_factory.h>
 #include <faiss/IndexPreTransform.h>
 #include <faiss/VectorTransform.h>
@@ -46,6 +47,9 @@ DEFINE_string(index_factory_str,"","like IMI2x8,PQ8+16");
 DEFINE_bool(make_index,true,"制作index还是查询index, true:only make index, false: only search index");
 DEFINE_string(groundtruth_file,"","file content vectors to learn,format:ivecs");
 DEFINE_string(query_file,"","file content vectors to learn,format:ivecs");
+DEFINE_bool(query_single,true,"为了保证可比性，与gnoimi一样单个query查询，避免faiss的batch加速");
+DEFINE_uint64(efSearch,100,"hnsw参数");
+DEFINE_uint64(efConstruction,200,"hnsw参数");
 DEFINE_string(search_args,"","k_factor=xx,k_factor_rf=xx,nprobe=xx,ht=xx,max_codes=xx,efSearch=xx,\
   if you want set multi search_args use | concat them, eg:nprobe=10|nprobe=20|nprob=30");
 
@@ -83,6 +87,7 @@ int main(int argc,char** argv)
     faiss::Index * index;
 
     size_t d = FLAGS_D;
+    faiss::IndexHNSWFlat * hnsw = nullptr;
 if (FLAGS_make_index) {
     {
         LOG(INFO) <<"["<<elapsed() - t0<<" s] Loading train set";
@@ -108,6 +113,12 @@ if (FLAGS_make_index) {
           LOG(INFO) <<"this is a IndexIVFPQ, do_polysemous_training:"<<pp->do_polysemous_training;
         } else {
           LOG(INFO) <<"this is not a  IndexIVFPQ";
+        }
+        hnsw = dynamic_cast<faiss::IndexHNSWFlat*>(real_index);
+        if(hnsw != nullptr) {
+          LOG(INFO) << "this is HNSWFLAT index,set efSearch:" << FLAGS_efSearch <<",efConstruction:" << FLAGS_efConstruction; 
+          hnsw->hnsw.efSearch = FLAGS_efSearch;
+          hnsw->hnsw.efConstruction = FLAGS_efConstruction;
         }
         LOG(INFO) <<"["<<elapsed() - t0<<" s] Training on "<<nt<<" vectors";
         index->train(nt, xt);
@@ -141,7 +152,11 @@ if (FLAGS_make_index) {
         } else {
           printf("this is not a  IndexIVFPQ\n");
         }
-
+        hnsw = dynamic_cast<faiss::IndexHNSWFlat*>(real_index);
+        if(hnsw != nullptr) {
+          LOG(INFO) << "this is HNSWFLAT index, get efSearch:" << hnsw->hnsw.efSearch <<",efConstruction:" << hnsw->hnsw.efConstruction
+            << ",max_level:"<< hnsw->hnsw.max_level; 
+        }
     }
     size_t nq = FLAGS_query_N;
     auto queries =  gnoimi::read_bfvecs(FLAGS_query_file.c_str(), FLAGS_D, nq,true);
@@ -154,10 +169,10 @@ if (FLAGS_make_index) {
                 elapsed() - t0, nq);
 
         // load ground-truth and convert int to long
-        size_t nq2;
+        size_t nq2 = 0;
         auto tmp = ivecs_read(groundtruth_file.c_str(), &gt_d, &nq2);
         int *gt_int = tmp.get();
-        CHECK(nq2 == nq || !"incorrect nb of ground truth entries");
+        CHECK(nq2 >= nq) << "nq2:"<<nq2 << ",nq:"<<nq ;
         LOG(INFO) <<"get nq:"<< nq2 <<" k:"<< gt_d<<" from gt file:" << groundtruth_file.c_str();
 
         gt = new faiss::Index::idx_t[gt_d * nq];
@@ -187,12 +202,18 @@ if (FLAGS_make_index) {
         loop = 1;
         double t1 = elapsed();
         for(int i=0;i<loop;++i) {
-          index->search(nq, xq, k, D, I);
+          if(FLAGS_query_single == false) {
+            index->search(nq, xq, k, D, I);
+          } else {
+            for(int j = 0;j < nq;j++) {
+              index->search(1,xq + j * FLAGS_D, k, D + j * k, I + j * k);    
+            }
+          }
         }
         double t2 = elapsed();
 
-        LOG(INFO) << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e6<<" us, "<<(t2 - t1)*1e6/(nq*loop)<<" us each query"
-          <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop);
+        std::cout << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e6<<" us, "<<(t2 - t1)*1e6/(nq*loop)<<" us each query"
+          <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop) << "\n";
 
         printf("indexIVFPQ_stats.n_hamming_pass:%ld,nrefine:%ld,search_cycles:%ld,refine_cycles:%ld\n",
                indexIVFPQ_stats.n_hamming_pass,indexIVFPQ_stats.nrefine,indexIVFPQ_stats.search_cycles,
@@ -201,6 +222,10 @@ if (FLAGS_make_index) {
                indexIVF_stats.nq,indexIVF_stats.nlist,indexIVF_stats.ndis,indexIVF_stats.nheap_updates,
                indexIVF_stats.quantization_time,indexIVF_stats.search_time,
                indexIVF_stats.ndis==0?0.0:(1.0-indexIVFPQ_stats.n_hamming_pass*1.0/indexIVF_stats.ndis));
+        if(hnsw != nullptr) {
+          std::cout << "hnsw_stats.nreorder:" << hnsw_stats.nreorder << ",n1:"<<hnsw_stats.n1 <<",n2:" << hnsw_stats.n2
+            << ",n3:" << hnsw_stats.n3 <<",ndis:" << hnsw_stats.ndis <<",view:"<<hnsw_stats.view << "\n";
+        }
         indexIVFPQ_stats.reset();
         indexIVF_stats.reset();
         // evaluate result by hand.
@@ -215,9 +240,9 @@ if (FLAGS_make_index) {
                 }
             }
         }
-        LOG(INFO) <<"R@1 = " << n_1 / float(nq);
-        LOG(INFO) <<"R@10 = " << n_10 / float(nq);
-        LOG(INFO) <<"R@100 = " << n_100 / float(nq);
+        std::cout <<"R@1 = " << n_1 / float(nq) << "\n";
+        std::cout <<"R@10 = " << n_10 / float(nq) << "\n";
+        std::cout <<"R@100 = " << n_100 / float(nq) << "\n";
     }
     LOG(INFO) << "finish";
 }

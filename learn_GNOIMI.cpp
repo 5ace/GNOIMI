@@ -45,7 +45,9 @@ DEFINE_int32(trainThreadChunkSize,10000,"the dim num for yael fmat_mul_full ");
 DEFINE_bool(direct_train_s_t_alpha,false,"false = alreay train coarse fine and alpha, and read them from file");
 DEFINE_bool(train_pq,true,"is train pq");
 DEFINE_bool(train_opq,true,"分2种情况1.跟faiss一样用原始向量训练opq；2.用残差训练opq、用残差*opq训练pq；这里设置true就是方法2用残差训练opq");
-DEFINE_bool(train_lopq,true,"每个一级倒排链单独训练一个pq和opq旋转矩阵,faiss每个kmeans最少需要40*k=10240,4000个倒排链最好是5000w训练数据，每个倒排链分配1万多个训练数据");
+DEFINE_bool(train_lopq,false,"每个一级倒排链单独训练一个pq和opq旋转矩阵,faiss每个kmeans最少需要40*k=10240,4000个倒排链最好是5000w训练数据，每个倒排链分配1万多个训练数据");
+DEFINE_int32(lopq_train_coarse,-1,"可选值-1,[0-K-1],-1表示单机训练所有的,0-K-1表示本机只训练lopq_train_coarse这个对应的粗类中心的lopq和lpq");
+DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀，最好单独放到一个目录下");
 
 size_t D;
 int K;
@@ -79,6 +81,8 @@ float* fineVocabDen;
 float* coarseVocabNum;
 float* coarseVocabDen;
 
+vector<uint32_t> coarse_doc_num;
+
 vector<float*> fineVocabNumerators;
 vector<float*> fineVocabDenominators;
 vector<float*> coarseVocabNumerators;
@@ -95,6 +99,7 @@ string coarseVocabFilename;
 string pqFileName;
 string pqIndexFileName;
 string opq_matrix_file;
+string lpq_file_prefix;
 
 ///////////////////////////
 void computeOptimalAssignsSubset(int threadId) {
@@ -281,6 +286,7 @@ void init_global_varibles() {
     pqFileName = outputFilesPrefix + "pq.fvecs";
     pqIndexFileName = outputFilesPrefix + "pq.faiss.index";
     opq_matrix_file = outputFilesPrefix + "opq_matrix.fvecs";
+    lpq_file_prefix = FLAGS_lpq_file_prefix;
 }
 void update_precompute() {
       //计算每个类中心的内积,用于计算距离使用
@@ -404,10 +410,17 @@ void update_residuls() {
     update_precompute();
     update_assigns();
 
+    coarse_doc_num.resize(K,0);
+    memset(coarse_doc_num.data(),0,sizeof(coarse_doc_num[0])*coarse_doc_num.size());
+
     LOG(INFO) << "[Residual] start miuns";
     #pragma omp parallel for num_threads(threadsCount)
     for(int i = 0 ; i < totalLearnCount;i++) {
       int coarseAssign = coarseAssigns[i];
+      #pragma omp critical
+      {
+        coarse_doc_num[coarseAssign]++;
+      }
       int fineAssign = fineAssigns[i];
       float * coarse = coarseVocab + coarseAssign * D;
       float * fine = fineVocab + fineAssign * D;
@@ -427,8 +440,33 @@ void update_residuls() {
     LOG(INFO) << "=====alpha ====" << alpha[coarseAssigns[3]*K + fineAssigns[3]];
     LOG(INFO) << "=====residual ====";
     gnoimi::print_elements(residual_vecs+3*D,D);
-
-    LOG(INFO) << "[Residual] finish miuns";
+    int sum = 0;
+    for(int i = 0; i < K; i++){
+      LOG(INFO) << "coarse " << i <<", has " << coarse_doc_num[i] << " elements";
+      sum += coarse_doc_num[i];
+    }
+    LOG(INFO) << "[Residual] finish miuns " << sum ;
+}
+//训练opq，保存到save_filename，并且改变训练向量x=R*x
+void train_opq(uint64_t n, float* x, string save_filename) {
+      faiss::OPQMatrix opq(D,FLAGS_M);
+      opq.verbose = true;
+      opq.train(n,x);
+      fvecs_write(save_filename.c_str(),D,D,opq.A.data());
+      // 旋转残差
+      float * r = new float[n * D];
+      fmat_mul_full(opq.A.data(), x , D, n, D, "TN", r);
+      memcpy(x,r,sizeof(float) * n * D);
+      delete[] r;
+}
+void train_pq(uint64_t n, float* x, string save_matrix_filename, string save_faiss_filename) {
+      //开始训练PQ
+      faiss::IndexPQ pq(D,FLAGS_M,FLAGS_KK_nbits);
+      pq.do_polysemous_training = true;
+      pq.verbose = true;
+      pq.train(n,x);
+      fvecs_write(save_matrix_filename.c_str(),pq.pq.dsub,pq.pq.ksub*pq.pq.M,pq.pq.centroids.data());
+      faiss::write_index(&pq,save_faiss_filename.c_str());
 }
 int main(int argc, char** argv) {
     gnoimi::print_elements(argv,argc);
@@ -442,6 +480,7 @@ int main(int argc, char** argv) {
     D = FLAGS_d;
     totalLearnCount = FLAGS_n;
     std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount, true); 
+    // 初始化全局变量
     init_global_varibles();
     // 读取训练向量
     train_vecs = features.get();
@@ -460,13 +499,9 @@ int main(int argc, char** argv) {
       fvecs_read(fineVocabFilename.c_str(), D, K, fineVocab);
       fvecs_read(coarseVocabFilename.c_str(), D, K, coarseVocab);
     }
-    if(!FLAGS_train_pq) {
-      LOG(INFO) << " not train pq finish ";
-      return 0;
-    } 
+    
     // 计算残差
     update_residuls();
-
 
     if(FLAGS_train_opq) {
       LOG(INFO) << "train opq start ==== ";
@@ -483,30 +518,60 @@ int main(int argc, char** argv) {
       fmat_mul_full(opq.A.data(), residual_vecs, D, totalLearnCount, D, "TN", r);
       memcpy(residual_vecs,r,sizeof(float)*totalLearnCount*D);
       delete[] r;
-      //#pragma omp parallel for num_threads(threadsCount)
-      //for(int i = 0 ; i< totalLearnCount; i+=trainThreadChunkSize) {
-      //  int num = (totalLearnCount < i + trainThreadChunkSize) ? totalLearnCount - i : trainThreadChunkSize;
-      //  LOG(INFO) << "i:" << i <<",num:"<<num<<",A:"<<opq.A.size() <<",D:"<<D;
-      //  float * r = new float[num*D];
-      //  fmat_mul_full(opq.A.data(), residual_vecs + i * D, D, num, D, "TN", r);
-      //  memcpy(residual_vecs + i * D,r,sizeof(float)*num*D);
-      //  delete[] r;
-      //}
       LOG(INFO) << "========R*residual[0] =======";
       gnoimi::print_elements(residual_vecs,D);
       LOG(INFO) << "calc R*Residual end";
     }
 
-    //开始训练PQ
-    LOG(INFO) << "train PQ start";
-    faiss::IndexPQ pq(D,FLAGS_M,FLAGS_KK_nbits);
-    pq.do_polysemous_training = true;
-    pq.verbose = true;
-    pq.train(totalLearnCount,residual_vecs);
-    fvecs_write(pqFileName.c_str(),pq.pq.dsub,pq.pq.ksub*pq.pq.M,pq.pq.centroids.data());
-    faiss::write_index(&pq,pqIndexFileName.c_str());
-    LOG(INFO) << "train PQ finish";
+    if(FLAGS_train_pq) {
+      //开始训练PQ
+      LOG(INFO) << "train PQ start";
+      faiss::IndexPQ pq(D,FLAGS_M,FLAGS_KK_nbits);
+      pq.do_polysemous_training = true;
+      pq.verbose = true;
+      pq.train(totalLearnCount,residual_vecs);
+      fvecs_write(pqFileName.c_str(),pq.pq.dsub,pq.pq.ksub*pq.pq.M,pq.pq.centroids.data());
+      faiss::write_index(&pq,pqIndexFileName.c_str());
+      LOG(INFO) << "train PQ finish";
+    }
 
+    if(FLAGS_train_lopq) {
+      CHECK(FLAGS_lopq_train_coarse >= -1 && FLAGS_lopq_train_coarse < FLAGS_k);
+      CHECK(!lpq_file_prefix.empty());
+      LOG(INFO) << "train LOPQ start FLAGS_lopq_train_coarse:" << FLAGS_lopq_train_coarse;
+      std::vector<int> coarse_centers;
+      if(FLAGS_lopq_train_coarse == -1) {
+        for(int i = 0; i < FLAGS_k; i++)
+          coarse_centers.push_back(i);
+      } else {
+          coarse_centers.push_back(FLAGS_lopq_train_coarse);
+      }
+      // 相同一级聚类的residual拷贝到一起
+      vector<float> train_residual; 
+      for(auto coarse_center : coarse_centers) {
+        train_residual.resize(coarse_doc_num[coarse_center] * D);
+        int idx = 0;
+        for(int i = 0 ; i < totalLearnCount;i++) {
+          int coarseAssign = coarseAssigns[i];
+          if(coarseAssign == coarse_center) {
+            memcpy(train_residual.data() + idx * D, residual_vecs + i * D , sizeof(float) * D); 
+            idx++;
+          }
+        }
+        CHECK(idx == coarse_doc_num[coarse_center]) << "coarse_center:" <<coarse_center <<",idx:"<<idx
+          <<",coarse_doc_num[coarse_center]:" << coarse_doc_num[coarse_center];
+        LOG(INFO) << "start train lopq of " << coarse_center;
+        train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
+        LOG(INFO) << "finish train lopq of " << coarse_center;
+
+        LOG(INFO) << "start train pq of " << coarse_center;
+        train_pq(coarse_doc_num[coarse_center], train_residual.data(), 
+          lpq_file_prefix+"_"+std::to_string(coarse_center)+".pq_matrix.fvecs",
+          lpq_file_prefix+"_"+std::to_string(coarse_center)+".pq.faiss.index");
+        LOG(INFO) << "end train pq of " << coarse_center;
+      }
+    }
+    
 
     free(coarseAssigns);
     free(fineAssigns);

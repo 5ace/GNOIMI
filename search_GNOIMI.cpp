@@ -24,6 +24,7 @@
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/utils/distances.h>
 #include <faiss/VectorTransform.h>
+#include <faiss/impl/HNSW.h>
 #include <gflags/gflags.h>
 #include <faiss/index_io.h>
 
@@ -41,7 +42,7 @@ DEFINE_string(index_prefix,"./index_gnoimi_","prefix of index files");
 DEFINE_string(base_file,"","file content vectors to index,format:bvecs or fvecs");
 DEFINE_uint64(K,4096,"coarse and residual centriods num");
 DEFINE_uint64(D,128,"feature dim");
-DEFINE_int32(M,16,"PQ's subvector num");
+DEFINE_uint64(M,16,"PQ's subvector num");
 DEFINE_uint64(N,1000000000,"index vectors num");
 DEFINE_int64(L,32,"coarse search num for GNOIMI");
 DEFINE_int32(rerankK,256,"PQ number of bit per subvector index,");
@@ -57,7 +58,7 @@ std::vector<int> grouth_cellid;
 int gt_in_LK = 0; // gt在 L个倒排链中的query个数
 int gt_in_retrievaled = 0; // gt被遍历过的query 个数
 
-const int M = 16;
+const uint64_t M = 16;
 struct Record {
   int pointId;
   unsigned char bytes[M];
@@ -78,7 +79,7 @@ struct Searcher {
   string model_prefix_,index_prefix_;
   uint64_t D;
   uint64_t K;
-  int M;
+  uint64_t M;
   int subDim;
   int rerankK;
   int threadsCount;
@@ -90,7 +91,7 @@ struct Searcher {
   string fineCodebookFilename;
   string alphaFilename, rerankRotationFilename, rerankVocabsFilename, cellEdgesFilename,rawIndexFilename,rerankPQFaissFilename,rerankPQFaissWithDataFilename;
 
-  Searcher(string model_prefix,string index_prefix,uint64_t D,uint64_t K, int M, int rerankK,int threadsCount) {
+  Searcher(string model_prefix,string index_prefix,uint64_t D,uint64_t K, uint64_t M, int rerankK,int threadsCount) {
     pq = nullptr;
     pq_with_data = nullptr;
     index = nullptr;
@@ -271,9 +272,9 @@ struct Searcher {
     }  
   }
   bool SaveIndex() {
-    CHECK(pq->codes.size() == FLAGS_N * FLAGS_M) << "pq code size:"
-      << pq->codes.size() << ", want:" << FLAGS_N * FLAGS_M;
-    LOG(INFO) << "start saving index to " << cellEdgesFilename << "," << rawIndexFilename; 
+    CHECK(pq->codes.size() == docnum * FLAGS_M) << "pq code size:"
+      << pq->codes.size() << ", want:" << docnum * FLAGS_M;
+    LOG(INFO) << "start saving index to " << cellEdgesFilename << "," << rawIndexFilename << ",codesize:" << pq->codes.size(); 
     std::ofstream outputCellEdges(cellEdgesFilename.c_str(), ios::binary | ios::out);
     std::ofstream outIndex(rawIndexFilename.c_str(), ios::binary | ios::out);
     CHECK(outputCellEdges.good());
@@ -291,13 +292,13 @@ struct Searcher {
         continue;
        }
        for(auto docid : doclist) {
-        r.pointId = docid; 
-        memcpy((char*)&(r.bytes[0]),(char*)(pq->codes.data()+docid*M),M);
-        if(docid < 100) {
-          LOG(INFO) << "=====codeinfo save index docid:" << docid;
-          gnoimi::print_elements((char*)(pq->codes.data()+docid*M),M);
-        }
-        outIndex.write((char*)&r,sizeof(r));
+          r.pointId = docid; 
+          memcpy((char*)&(r.bytes[0]),(char*)(pq->codes.data() + (uint64_t)docid * M), M);
+          if(docid < 100) {
+            LOG(INFO) << "=====codeinfo save index docid:" << docid;
+            gnoimi::print_elements((char*)(pq->codes.data() + docid * M), M);
+          }
+          outIndex.write((char*)&r,sizeof(r));
        }
        //outIndex.write((char*)doclist.data(),sizeof(int)*doclist.size());
        //for(auto docid : doclist) {
@@ -313,7 +314,7 @@ struct Searcher {
     ivf.clear();
     faiss::write_index(pq,rerankPQFaissWithDataFilename.c_str());
     delete pq;
-    LOG(INFO) << "finsih save index total write " << cellEdge << " want " << FLAGS_N;
+    LOG(INFO) << "finsih save index total write " << cellEdge << " want " << docnum;
     return true;
   };
   // 不能多线程调用
@@ -720,7 +721,7 @@ float computeRecallAt(const vector<vector<std::pair<float, int> > >& result,
       }
     }
     if(!hit) {
-      LOG(INFO) << "[GT MISS] query " << i << ", want " << *(groundtruth + i * gt_d) << ", @" << limit;
+      //LOG(INFO) << "[GT MISS] query " << i << ", want " << *(groundtruth + i * gt_d) << ", @" << limit;
     }
   }
   return (float(positive) / result.size());
@@ -748,6 +749,7 @@ int main(int argc, char** argv) {
     if(FLAGS_nprobe <=0 || FLAGS_nprobe > FLAGS_K * FLAGS_L) {
       FLAGS_nprobe = FLAGS_K * FLAGS_L;
     }
+    CHECK(M == FLAGS_M);
     CHECK(FLAGS_rerankK == 256) << "rerankK must = 256";
     CHECK(FLAGS_L >= 0 && FLAGS_L <= FLAGS_K );
     LOG(INFO) << "sizeof Record " << sizeof(Record);
@@ -760,18 +762,19 @@ int main(int argc, char** argv) {
       CHECK(!FLAGS_base_file.empty()) << "need set file base_file";
       CHECK(searcher.LoadPQ());
       LOG(INFO) << "start indexing";
-      uint64_t read_num = FLAGS_N;
-      if(read_num > 0) {
+      searcher.docnum = FLAGS_N;
+      if(searcher.docnum > 0) {
         //预申请空间
         for(auto & i:searcher.ivf){
-          i.reserve((read_num+1000000)/(searcher.K*searcher.K));
+          i.reserve((searcher.docnum+1000000)/(searcher.K*searcher.K));
         }
       }
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
-         searcher.D, read_num, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
+         searcher.D, searcher.docnum, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
          std::placeholders::_2, std::placeholders::_3));
-      LOG(INFO) << "end index,read " << read_num << ",want " << FLAGS_N;
+      LOG(INFO) << "end index,read " << searcher.docnum << ",want " << FLAGS_N;
       searcher.SaveIndex();
+      return 0;
     }
     CHECK(!access(FLAGS_groud_truth_file.c_str(),0)  && !access(FLAGS_query_filename.c_str(),0));
     searcher.LoadIndex();
@@ -838,11 +841,11 @@ int main(int argc, char** argv) {
     }
     double t1 = elapsed();
 
-    ComputeRecall(results, groundtruth.get(),gt_d); 
-    LOG(INFO) << "[COST] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe;
+    LOG(INFO) << "[COST] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe << "\n";
     if(FLAGS_print_gt_in_LK) {
-      LOG(INFO) << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << gt_in_LK << " " << gt_in_LK*1.0/queriesCount
-        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << ",top:"<< FLAGS_neighborsCount;
+      std::cout << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << gt_in_LK << " " << gt_in_LK*1.0/queriesCount
+        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << ",top:"<< FLAGS_neighborsCount << "\n";
     }
+    ComputeRecall(results, groundtruth.get(),gt_d); 
     return 0;
 }
