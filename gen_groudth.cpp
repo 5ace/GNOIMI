@@ -40,13 +40,15 @@ int main(int argc, char** argv) {
       gnoimi::end_with(FLAGS_groud_truth_file,".ivecs") && (gnoimi::end_with(FLAGS_query_filename,".fvecs")
       || gnoimi::end_with(FLAGS_query_filename,".bvecs") ) );
     CHECK(FLAGS_K>0);
+    // 读取query
+    size_t q_num = FLAGS_query_N;
+    auto query = gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, q_num, false);
+
     faiss::IndexFlat index(FLAGS_D);
     auto AddIndex = [](faiss::IndexFlat* index ,size_t n,const float *x,size_t start) {index->add(n,x);}; 
     gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
       FLAGS_D , FLAGS_N, 10000,std::bind(AddIndex,&index,std::placeholders::_1,std::placeholders::_2,std::placeholders::_3));
-    // 读取query
-    size_t q_num = FLAGS_query_N;
-    auto query = gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, q_num, false);
+
     std::vector<float> dis(q_num*FLAGS_K);
     std::vector<int64_t> pos(q_num*FLAGS_K);
     std::vector<int> pos_i;

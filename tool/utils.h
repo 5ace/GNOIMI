@@ -137,10 +137,10 @@ std::vector<std::string> split(const std::string &str,const std::string &pattern
     return resVec;
 }
 
-static long xvecs_fsize(long unitsize, const char * fname, size_t *d_out, size_t *n_out)
+static long xvecs_fsize(uint64_t unitsize, const char * fname, size_t *d_out, size_t *n_out)
 {
     int d, ret;
-    long nbytes;
+    uint64_t nbytes;
 
     *d_out = -1;
     *n_out = -1;
@@ -231,8 +231,8 @@ long ivecs_fread (FILE * f, int * v, long n);
 
 int b2fvecs_read_callback (const char *fname, size_t &d, size_t &n, size_t each_loop_num,
                               Call_back call_back, bool normalized = true) {
-    size_t n_new;
-    size_t d_new;
+    size_t n_new = 0;
+    size_t d_new = 0;
     bool is_fvecs = false;
 
     if(end_with(fname,".fvecs")) {
@@ -284,8 +284,8 @@ int b2fvecs_read_callback (const char *fname, size_t &d, size_t &n, size_t each_
 }
 float* b2fvecs_read (const char *fname, size_t &d, size_t &n)
 {
-    size_t n_new;
-    size_t d_new;
+    size_t n_new = 0;
+    size_t d_new = 0;
     bvecs_fsize (fname, &d_new, &n_new);
     if(d==0) {
       d = d_new;
@@ -294,7 +294,7 @@ float* b2fvecs_read (const char *fname, size_t &d, size_t &n)
       n = n_new;
     }
     assert (d_new == d);
-    assert (n <= n_new);
+    CHECK(n <= n_new) << "n:" << n <<",n_new:" << n_new;
     float* v = new float[d * n];
 
     FILE * f = fopen (fname, "r");
