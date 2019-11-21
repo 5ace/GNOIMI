@@ -321,6 +321,7 @@ struct Searcher {
   void AddIndex(int L, uint64_t n, float *x, uint64_t start_id) {
     static vector<vector<int>> cellids;
     static vector<vector<float>> residuals;
+    static vector<vector<int>> recall_cell_num_for_each_querys;
     if(start_id == 0) {
         LOG(INFO) << "======ori id 0, L:" << L << ",n:" << n <<",D:" << D;
         gnoimi::print_elements(x,D);
@@ -329,13 +330,14 @@ struct Searcher {
     int loopNum = (n + loopN - 1)/loopN;
     cellids.resize(loopNum);
     residuals.resize(loopNum);
+    recall_cell_num_for_each_querys.resize(loopNum);
 
     int nprobe = 1;
     #pragma omp parallel for if(FLAGS_threadsCount > 1)  num_threads(FLAGS_threadsCount)
     for(uint64_t i = 0; i < loopNum; ++i) {
       int tmp_n = (i==loopNum-1) ? n - (loopNum-1) * loopN : loopN;
       LOG(INFO) << "loopN " << i * loopN * D << ",loopNum:"<<loopNum<<",n:"<< n <<",start_id:"<<start_id <<",tmp_n:"<<tmp_n;
-      SearchIvf(tmp_n, x + i * loopN * D, L, nprobe, cellids[i], residuals[i]);  
+      SearchIvf(tmp_n, x + i * loopN * D, L, nprobe, cellids[i], residuals[i],recall_cell_num_for_each_querys[i]);  
     }
    
     auto t1 = std::thread( [this,start_id]() {
@@ -385,13 +387,16 @@ struct Searcher {
     @residuals cellids 在query情况下，只返回倒排链不为空的cellid和其残差，并且达到neighborsCount之后不再计算,
       即residuals cellids的size虽然是queriesCount * nprobe * D 和 queriesCount * nprobe,但实际有意义的只在前几个
   */
-  bool SearchIvf(uint64_t queriesCount, float *queries, uint64_t L, int &nprobe, vector<int> &cellids,vector<float> &residuals, bool is_index = true,
+  bool SearchIvf(uint64_t queriesCount, float *queries, uint64_t L, int &nprobe, vector<int> &cellids,vector<float> &residuals, 
+      vector<int> &recall_cell_num_for_each_query, bool is_filter_empty_cell = false,
       uint64_t start_id = 0, uint64_t neighborsCount = 0xFFFFFFFFUL) {
     if(nprobe > L * K || nprobe <= 0) {
       nprobe = L * K;
     }
     residuals.resize(queriesCount * nprobe * D);
     cellids.resize(queriesCount * nprobe);
+    recall_cell_num_for_each_query.resize(queriesCount);
+
     int subDim = D / M;
     std::clock_t c_start = std::clock();
     double t0 = elapsed();
@@ -477,7 +482,7 @@ struct Searcher {
         //得到cellid
         int cellId = scores[travesered_list_num].second;
 
-        if(is_index == false) {
+        if(is_filter_empty_cell == true) {
           int last = (cellId == 0 ? 0 : cellEdges[cellId-1]);
           //是query情形
           if(recall_doc_num >= neighborsCount) {
@@ -502,6 +507,7 @@ struct Searcher {
         candi_cell_id[recall_doclist_num] = cellId;
         ++recall_doclist_num;
       }
+      recall_cell_num_for_each_query[qid] = recall_doclist_num; 
       double t5 = elapsed();
       c5 += (t5 - t4);
     }
@@ -514,14 +520,16 @@ struct Searcher {
                               int n, int L, int nprobe, int neighborsCount, 
                               vector<vector<std::pair<float, int> > >& result, uint64_t start_id) {
     result.resize(n);
-    //result查询结果每个query保存neighborsCount=5000个结果
+    //result查询结果每个query保存neighborsCount个结果
     thread_local vector<int> cellids;
     thread_local vector<float> residuals;
+    thread_local vector<int> recall_cell_num_for_each_query; // query的时候对于空倒排连不计算残差了，所以返回的cell个数<=nprobe
+
     // LOG(INFO) << "query vec Squared L2 norm " << faiss::fvec_norm_L2sqr(x,D);
 
     // 根据neighborsCount预估需要遍历倒排链的个数主要是为了减少std::partial_sort(L*K)的时间
     double t0 = elapsed();
-    SearchIvf(n, x, L, nprobe, cellids, residuals,false,start_id,neighborsCount);  
+    SearchIvf(n, x, L, nprobe, cellids, residuals, recall_cell_num_for_each_query, true,start_id,neighborsCount);  
     double t1 = elapsed();
     //for(int i = 0; i < n; i++) {
     //  LOG(INFO) << "QueryIndex doc:" << start_id + i << ",search to cell:" << cellids[i*nprobe] << ",nprobe:"<<nprobe;
@@ -540,7 +548,7 @@ struct Searcher {
         int check_cell_num = 0;
         int empty_cell_num = 0;
         //遍历多个倒排链
-        for(int i = 0; i < nprobe; i++) {
+        for(int i = 0; i < recall_cell_num_for_each_query[qid]; i++) {
           //得到倒排链数据
           int cellId = candi_cell_id[i];
           int cellStart = (cellId == 0) ? 0 : cellEdges[cellId - 1];
@@ -583,23 +591,23 @@ struct Searcher {
               }
             }
             // 现计算距离
-            if(index[id].pointId < 100) {
-              LOG(INFO) << "=====codeinfo query docid:" << index[id].pointId;
-              gnoimi::print_elements((char*)&(index[id].bytes[0]),FLAGS_M);
-              if(dis_computer) {
-                LOG(INFO) << " match docid:"<< index[id].pointId <<",local dis:" << result[qid][found].first << ",faiss diss:" << (*dis_computer)(index[id].pointId);
-              }
-            }
+            //if(index[id].pointId < 100) {
+            //  LOG(INFO) << "=====codeinfo query docid:" << index[id].pointId;
+            //  gnoimi::print_elements((char*)&(index[id].bytes[0]),FLAGS_M);
+            //  if(dis_computer) {
+            //    LOG(INFO) << " match docid:"<< index[id].pointId <<",local dis:" << result[qid][found].first << ",faiss diss:" << (*dis_computer)(index[id].pointId);
+            //  }
+            //}
             ++found;
           }
         }
         std::sort(result[qid].begin(), result[qid].end());
         LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
-          << empty_cell_num << " found " << found;
-        for(int z = 0; z < 10 && z < result[qid].size();z++) {
-          LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second <<","<< ",score:"
-          <<result[qid][z].first;
-        }
+          << empty_cell_num << " found " << found ;
+        //for(int z = 0; z < 10 && z < result[qid].size();z++) {
+        //  LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second <<","<< ",score:"
+        //  <<result[qid][z].first;
+        //}
     }
     double t2 = elapsed();
     LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1e6/n <<" us, pq cost:" << (t2-t1)*1e6/n << ",total:" << (t2-t0)*1e6/n;
@@ -779,22 +787,12 @@ int main(int argc, char** argv) {
     CHECK(!access(FLAGS_groud_truth_file.c_str(),0)  && !access(FLAGS_query_filename.c_str(),0));
     searcher.LoadIndex();
     //searcher.LoadPQWithData();
-    uint64_t queriesCount = FLAGS_queriesCount;
+
     // 读取query
+    uint64_t queriesCount = FLAGS_queriesCount;
     auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,true);
     LOG(INFO) << "L2 norm " << faiss::fvec_norm_L2sqr(queries.get(), FLAGS_D);
     LOG(INFO) << "read "<< queriesCount <<" doc from " << FLAGS_query_filename << ", d:" << FLAGS_D;
-    {
-      float * z = new float[FLAGS_D * FLAGS_D];
-      fmat_mul_full(searcher.rerankRotation,searcher.rerankRotation,
-                  FLAGS_D, FLAGS_D, FLAGS_D, "TN", z);
-      gnoimi::print_elements(z,2*FLAGS_D);
-      delete[] z;
-    }
-
-    LOG(INFO) << "========ori id:0 ";
-    gnoimi::print_elements(queries.get(),FLAGS_D);
-    float* temp = (float*) malloc(queriesCount * FLAGS_D * sizeof(float));
 
     // 读取groud truth
     uint64_t gt_d = 0;
@@ -829,9 +827,17 @@ int main(int argc, char** argv) {
     }
     
     // query
-    vector<vector<std::pair<float, int> > > results(queriesCount);
+    
     double t0 = elapsed();
-    int nprobe = (FLAGS_neighborsCount * FLAGS_K * FLAGS_K)/ searcher.docnum + 100;
+    {
+      float * z = new float[FLAGS_D * FLAGS_D];
+      fmat_mul_full(searcher.rerankRotation,searcher.rerankRotation,
+                  FLAGS_D, FLAGS_D, FLAGS_D, "TN", z);
+      gnoimi::print_elements(z,2*FLAGS_D);
+      delete[] z;
+    }
+    vector<vector<std::pair<float, int> > > results(queriesCount);
+    int nprobe = (FLAGS_nprobe == 0) ? (FLAGS_neighborsCount * FLAGS_K * FLAGS_K)/ searcher.docnum + 100 : FLAGS_nprobe;
     #pragma omp parallel for num_threads(FLAGS_threadsCount)
     for(uint64_t i = 0 ; i< queriesCount; i++) {
       vector<vector<std::pair<float, int> > > result;
@@ -841,10 +847,11 @@ int main(int argc, char** argv) {
     }
     double t1 = elapsed();
 
-    LOG(INFO) << "[COST] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe << "\n";
+    LOG(INFO) << "[COST] ["<< (t1-t0) << " s] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe 
+      << ",L:"<< FLAGS_L <<",top:"<< FLAGS_neighborsCount<< "\n";
     if(FLAGS_print_gt_in_LK) {
       std::cout << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << gt_in_LK << " " << gt_in_LK*1.0/queriesCount
-        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << ",top:"<< FLAGS_neighborsCount << "\n";
+        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << "\n";
     }
     ComputeRecall(results, groundtruth.get(),gt_d); 
     return 0;

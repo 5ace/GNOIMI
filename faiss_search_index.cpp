@@ -214,20 +214,22 @@ if (FLAGS_make_index) {
 
         std::cout << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e6<<" us, "<<(t2 - t1)*1e6/(nq*loop)<<" us each query"
           <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop) << "\n";
-
-        printf("indexIVFPQ_stats.n_hamming_pass:%ld,nrefine:%ld,search_cycles:%ld,refine_cycles:%ld\n",
+        if(pp) {
+          printf("indexIVFPQ_stats.n_hamming_pass:%ld,nrefine:%ld,search_cycles:%ld,refine_cycles:%ld\n",
                indexIVFPQ_stats.n_hamming_pass,indexIVFPQ_stats.nrefine,indexIVFPQ_stats.search_cycles,
                indexIVFPQ_stats.refine_cycles);
-        printf("indexIVF_stats.nq:%ld,nlist:%ld,ndis:%ld,nheap_updates:%ld,quantization_time:%.3f ms,search_time:%.3f ms, hamming_jump_rate:%.5f\n",
+          printf("indexIVF_stats.nq:%ld,nlist:%ld,ndis:%ld,nheap_updates:%ld,quantization_time:%.3f ms,search_time:%.3f ms, hamming_jump_rate:%.5f,nprobe=%d\n",
                indexIVF_stats.nq,indexIVF_stats.nlist,indexIVF_stats.ndis,indexIVF_stats.nheap_updates,
                indexIVF_stats.quantization_time,indexIVF_stats.search_time,
-               indexIVF_stats.ndis==0?0.0:(1.0-indexIVFPQ_stats.n_hamming_pass*1.0/indexIVF_stats.ndis));
-        if(hnsw != nullptr) {
-          std::cout << "hnsw_stats.nreorder:" << hnsw_stats.nreorder << ",n1:"<<hnsw_stats.n1 <<",n2:" << hnsw_stats.n2
-            << ",n3:" << hnsw_stats.n3 <<",ndis:" << hnsw_stats.ndis <<",view:"<<hnsw_stats.view << "\n";
+               indexIVF_stats.ndis==0?0.0:(1.0-indexIVFPQ_stats.n_hamming_pass*1.0/indexIVF_stats.ndis),pp->nprobe);
+          indexIVFPQ_stats.reset();
+          indexIVF_stats.reset();
         }
-        indexIVFPQ_stats.reset();
-        indexIVF_stats.reset();
+        if(hnsw) {
+          std::cout << "hnsw_stats.nreorder:" << hnsw_stats.nreorder << ",n1:"<<hnsw_stats.n1 <<",n2:" << hnsw_stats.n2
+            << ",n3:" << hnsw_stats.n3 <<",ndis:" << hnsw_stats.ndis <<",view:"<<hnsw_stats.view << ",efSearch:"<<hnsw->hnsw.efSearch <<"\n";
+          hnsw_stats.reset();
+        }
         // evaluate result by hand.
         int n_1 = 0, n_10 = 0, n_100 = 0;
         for(int i = 0; i < nq; i++) {
