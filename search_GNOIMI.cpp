@@ -34,6 +34,8 @@ using std::string;
 using std::vector;
 using namespace gnoimi;
 
+#define GNOIMI_QUERY_DEBUG
+
 DEFINE_string(groud_truth_file,"","format ivec");
 DEFINE_string(query_filename,"","format fvec");
 DEFINE_bool(make_index,true,"制作index还是查询index, true:only make index, false: only search index");
@@ -55,8 +57,23 @@ DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
 
 
 std::vector<int> grouth_cellid;
-int gt_in_LK = 0; // gt在 L个倒排链中的query个数
-int gt_in_retrievaled = 0; // gt被遍历过的query 个数
+struct SearchStats {
+  int gt_in_LK = 0; // gt在 L个倒排链中的query个数
+  int gt_in_retrievaled = 0; // gt被遍历过的query 个数
+  double ivf_cost = 0.0; //ms
+  double pq_cost = 0.0; //ms
+  uint64_t travel_doc = 0;
+  uint64_t nprobe = 0;
+
+  void Reset() {
+    gt_in_LK = 0;
+    gt_in_retrievaled = 0;
+    ivf_cost = 0.0;
+    pq_cost = 0.0;
+    travel_doc = 0;
+    nprobe = 0;
+  }
+} search_stats;
 
 const uint64_t M = 16;
 struct Record {
@@ -449,7 +466,7 @@ struct Searcher {
         // 统计代码
         if(grouth_cellid.size() != 0) {
           if(grouth_cellid[start_id + qid]/K == coarseId) {
-              gt_in_LK++; 
+              search_stats.gt_in_LK++; 
               LOG(INFO) << "GT CELL query:" << start_id + qid << ", hit corse cell:" << l;
           }
         } 
@@ -496,14 +513,14 @@ struct Searcher {
 
         int topListId = coarseIdToTopId[cellId / K]; //得到这个cellid对应的粗排的顺序
         //拷贝p-S
-        double t1 = elapsed();
+        //double t1 = elapsed();
         memcpy(query_residual + recall_doclist_num * D , coarseResiduals.data() + topListId * D, D * sizeof(float));
-        double t2 = elapsed();
+        //double t2 = elapsed();
         //residual = p -S - alpha*T
         cblas_saxpy(D, -1.0 * alpha[cellId], fineVocab + (cellId % K) * D, 1, query_residual + recall_doclist_num * D, 1);
-        double t3 = elapsed();
-        z1 += (t2 - t1);
-        z2 += (t3 - t2);
+        //double t3 = elapsed();
+        //z1 += (t2 - t1);
+        //z2 += (t3 - t2);
         candi_cell_id[recall_doclist_num] = cellId;
         ++recall_doclist_num;
       }
@@ -511,12 +528,12 @@ struct Searcher {
       double t5 = elapsed();
       c5 += (t5 - t4);
     }
-    LOG(INFO) << " SearchIvf COST:[" << (t1-t0)*1e6/queriesCount <<","<< c1*1e6/queriesCount << ","<< c2*1e6/queriesCount
-      << "," << c3*1e6/queriesCount << "," << c4*1e6/queriesCount<<","<< c5*1e6/queriesCount<<"] us" << ",memcpy:" << z1*1e6/queriesCount << ","
-      << "saxpy:" << z2*1e6/queriesCount << ",nprobe:" << nprobe;
+    LOG(INFO) << " SearchIvf COST:[" << (t1-t0)*1000/queriesCount <<","<< c1*1000/queriesCount << ","<< c2*1000/queriesCount
+      << "," << c3*1000/queriesCount << "," << c4*1000/queriesCount<<","<< c5*1000/queriesCount<<"] ms" << ",memcpy:" << z1*1000/queriesCount << ","
+      << "saxpy:" << z2*1000/queriesCount << ",nprobe:" << nprobe;
     return true;
   }
-  void SearchNearestNeighbors(float* x,
+  uint64_t SearchNearestNeighbors(float* x,
                               int n, int L, int nprobe, int neighborsCount, 
                               vector<vector<std::pair<float, int> > >& result, uint64_t start_id) {
     result.resize(n);
@@ -538,8 +555,8 @@ struct Searcher {
     //    gnoimi::print_elements(residuals.data()+i*nprobe*D,D);
     //  }
     //}
-    std::clock_t c_start = std::clock();
     float* cellVocab = rerankVocabs;
+    uint64_t travel_doc = 0;
     for(int qid = 0; qid < n; ++qid) {
         result[qid].resize(neighborsCount, std::make_pair(std::numeric_limits<float>::max(), -1));
         float* query_residual = residuals.data() + qid * nprobe * D;
@@ -567,7 +584,7 @@ struct Searcher {
 
           if(grouth_cellid.size() != 0) {
             if(grouth_cellid[start_id + qid] == cellId) {
-              gt_in_retrievaled++; 
+              search_stats.gt_in_retrievaled++; 
               LOG(INFO) << "GT CELL query:" << start_id + qid << ", hit retrieval cell:" << cellId;
             }
           }
@@ -608,9 +625,14 @@ struct Searcher {
         //  LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second <<","<< ",score:"
         //  <<result[qid][z].first;
         //}
+        travel_doc += found;
+        search_stats.nprobe += check_cell_num; 
     }
     double t2 = elapsed();
-    LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1e6/n <<" us, pq cost:" << (t2-t1)*1e6/n << ",total:" << (t2-t0)*1e6/n;
+    LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1000/n <<" ms, pq cost:" << (t2-t1)*1000/n << ",total:" << (t2-t0)*1000/n;
+    search_stats.pq_cost += (t2-t1)*1000;
+    search_stats.ivf_cost += (t1-t0)*1000;
+    return travel_doc;
 }
 };
 
@@ -822,7 +844,7 @@ int main(int argc, char** argv) {
       }
       for(int i = 0; i< queriesCount; i++) {
         grouth_cellid[i] = gts_cellid[groundtruth.get()[gt_d * i]];
-        LOG(INFO) << "FIND GT CELL query " << i << ", gt:" << groundtruth.get()[gt_d * i] << ", in cell:" << grouth_cellid[i];
+        //LOG(INFO) << "FIND GT CELL query " << i << ", gt:" << groundtruth.get()[gt_d * i] << ", in cell:" << grouth_cellid[i];
       }
     }
     
@@ -841,17 +863,21 @@ int main(int argc, char** argv) {
     #pragma omp parallel for num_threads(FLAGS_threadsCount)
     for(uint64_t i = 0 ; i< queriesCount; i++) {
       vector<vector<std::pair<float, int> > > result;
-      searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i);
+      search_stats.travel_doc += searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i);
       results[i]  = result[0];
       LOG(INFO) << "query finish " << i << ", result:" << result[0][0].second;
     }
     double t1 = elapsed();
-
-    LOG(INFO) << "[COST] ["<< (t1-t0) << " s] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1e6/queriesCount <<" us" <<",nprobe:" << nprobe 
-      << ",L:"<< FLAGS_L <<",top:"<< FLAGS_neighborsCount<< "\n";
+    std::cout.setf(ios::fixed);//precision控制小数点后的位数
+    std::cout.precision(2);//后2位
+    std::cout << "[COST] ["<< (t1-t0) << " s] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1000/queriesCount <<" ms" <<",nprobe:" << nprobe
+      << ",L:"<< FLAGS_L <<",top:"<< FLAGS_neighborsCount<< ",avg travel_doc:"<< search_stats.travel_doc*1.0/queriesCount 
+      << ",avg ivf cost:" << search_stats.ivf_cost*1.0/queriesCount<<" ms,avg pq cost:"<< search_stats.pq_cost*1.0/queriesCount
+      << ",avg check ivfs:"<< search_stats.nprobe/queriesCount <<"\n";
+    std::cout.precision(4);//后4位
     if(FLAGS_print_gt_in_LK) {
-      std::cout << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << gt_in_LK << " " << gt_in_LK*1.0/queriesCount
-        << ",gt_in_retrievaled:" << gt_in_retrievaled << " " << gt_in_retrievaled*1.0/queriesCount << "\n";
+      std::cout << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << search_stats.gt_in_LK*1.0/queriesCount
+        << ",gt_in_retrievaled:" << search_stats.gt_in_retrievaled*1.0/queriesCount << "\n";
     }
     ComputeRecall(results, groundtruth.get(),gt_d); 
     return 0;

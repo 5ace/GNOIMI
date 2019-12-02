@@ -46,7 +46,8 @@ DEFINE_bool(direct_train_s_t_alpha,false,"false = alreay train coarse fine and a
 DEFINE_bool(train_pq,true,"is train pq");
 DEFINE_bool(train_opq,true,"分2种情况1.跟faiss一样用原始向量训练opq；2.用残差训练opq、用残差*opq训练pq；这里设置true就是方法2用残差训练opq");
 DEFINE_bool(train_lopq,false,"每个一级倒排链单独训练一个pq和opq旋转矩阵,faiss每个kmeans最少需要40*k=10240,4000个倒排链最好是5000w训练数据，每个倒排链分配1万多个训练数据");
-DEFINE_int32(lopq_train_coarse,-1,"可选值-1,[0-K-1],-1表示单机训练所有的,0-K-1表示本机只训练lopq_train_coarse这个对应的粗类中心的lopq和lpq");
+DEFINE_int32(lopq_train_coarse_start,-1,"可选值0,..K-1,-1 means all");
+DEFINE_int32(lopq_train_coarse_end,-1,"可选值1,..K,-1 means all 主要为了分布式计算,[lopq_train_coarse_start,lopq_train_coarse_end)");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀，最好单独放到一个目录下");
 
 size_t D;
@@ -536,15 +537,22 @@ int main(int argc, char** argv) {
     }
 
     if(FLAGS_train_lopq) {
-      CHECK(FLAGS_lopq_train_coarse >= -1 && FLAGS_lopq_train_coarse < FLAGS_k);
       CHECK(!lpq_file_prefix.empty());
-      LOG(INFO) << "train LOPQ start FLAGS_lopq_train_coarse:" << FLAGS_lopq_train_coarse;
+      LOG(INFO) << "train LOPQ start FLAGS_lopq_train_coarse_start:" << FLAGS_lopq_train_coarse_start
+        <<",FLAGS_lopq_train_coarse_end:" << FLAGS_lopq_train_coarse_end;
+      CHECK(FLAGS_lopq_train_coarse_start >=-1 && FLAGS_lopq_train_coarse_start <= FLAGS_k
+        && FLAGS_lopq_train_coarse_end >=-1 && FLAGS_lopq_train_coarse_end <= FLAGS_k);
       std::vector<int> coarse_centers;
-      if(FLAGS_lopq_train_coarse == -1) {
+      if(FLAGS_lopq_train_coarse_start == -1 || FLAGS_lopq_train_coarse_end == -1) {
         for(int i = 0; i < FLAGS_k; i++)
           coarse_centers.push_back(i);
       } else {
-          coarse_centers.push_back(FLAGS_lopq_train_coarse);
+          for(int i = FLAGS_lopq_train_coarse_start; i < FLAGS_lopq_train_coarse_end && i < FLAGS_k; ++i)
+            coarse_centers.push_back(i);
+      }
+      if(coarse_centers.empty()) {
+        LOG(INFO) << "no coarse_centers";
+        return 0;
       }
       // 相同一级聚类的residual拷贝到一起
       vector<float> train_residual; 
@@ -560,7 +568,11 @@ int main(int argc, char** argv) {
         }
         CHECK(idx == coarse_doc_num[coarse_center]) << "coarse_center:" <<coarse_center <<",idx:"<<idx
           <<",coarse_doc_num[coarse_center]:" << coarse_doc_num[coarse_center];
-        LOG(INFO) << "start train lopq of " << coarse_center;
+        LOG(INFO) << "start train lopq of " << coarse_center <<", docnum:" << coarse_doc_num[coarse_center];
+        if(coarse_doc_num[coarse_center] < 256) {
+          LOG(ERROR) << "docnum:"<< coarse_doc_num[coarse_center] << " < 256,for coarse:"<<coarse_center;
+          continue;
+        }
         train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
         LOG(INFO) << "finish train lopq of " << coarse_center;
 

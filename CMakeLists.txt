@@ -50,3 +50,6 @@ TARGET_LINK_LIBRARIES (train_opq yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
 #########################################################################################
 ADD_EXECUTABLE (faiss_search_index faiss_search_index.cpp)
 TARGET_LINK_LIBRARIES (faiss_search_index yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (kmeans kmeans.cpp)
+TARGET_LINK_LIBRARIES (kmeans yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )

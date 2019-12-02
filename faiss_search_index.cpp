@@ -44,7 +44,8 @@ DEFINE_string(learn_file,"","file content vectors to learn,format:bvecs or fvecs
 DEFINE_uint64(learn_N,0,"want read vectors num");
 DEFINE_uint64(query_N,0,"want read vectors num");
 DEFINE_string(index_factory_str,"","like IMI2x8,PQ8+16");
-DEFINE_bool(make_index,true,"制作index还是查询index, true:only make index, false: only search index");
+DEFINE_bool(make_index,false,"制作index");
+DEFINE_bool(search_index,false,"是否查询index");
 DEFINE_string(groundtruth_file,"","file content vectors to learn,format:ivecs");
 DEFINE_string(query_file,"","file content vectors to learn,format:ivecs");
 DEFINE_bool(query_single,true,"为了保证可比性，与gnoimi一样单个query查询，避免faiss的batch加速");
@@ -63,7 +64,7 @@ int main(int argc,char** argv)
 
     double t0 = elapsed();
 
-    CHECK(!FLAGS_base_file.empty() && !FLAGS_learn_file.empty() && !FLAGS_index_factory_str.empty() && !FLAGS_index_file.empty() && !FLAGS_search_args.empty());
+    CHECK(!FLAGS_base_file.empty() && !FLAGS_learn_file.empty() && !FLAGS_index_factory_str.empty() && !FLAGS_index_file.empty());
 
     std::vector<std::string> selected_params_multi = split(FLAGS_search_args,"|");
     //bool do_polysemous_training = false;
@@ -73,6 +74,9 @@ int main(int argc,char** argv)
       //  do_polysemous_training = true; 
       //}
     }
+    LOG(INFO) << "selected_params_multi size:" << selected_params_multi.size();
+    if(selected_params_multi.empty())
+      selected_params_multi.push_back("");
 
     std::string query_file = FLAGS_query_file;
     std::string groundtruth_file = FLAGS_groundtruth_file;
@@ -130,8 +134,11 @@ if (FLAGS_make_index) {
       LOG(INFO) << "end index,read " << read_num << ",want " << FLAGS_N;
     faiss::write_index(index, FLAGS_index_file.c_str());
     LOG(INFO) <<"finish write index to " << FLAGS_index_file.c_str();
-    return 0;
 }
+    if(!FLAGS_search_index) {
+      LOG(INFO) << "not search index";
+      return 0;
+    }
     CHECK(!access(FLAGS_index_file.c_str(),0));
     index = faiss::read_index(FLAGS_index_file.c_str());
     faiss::IndexIVFPQ* pp = nullptr;
@@ -188,8 +195,8 @@ if (FLAGS_make_index) {
         faiss::ParameterSpace params;
         params.verbose = 2;
         LOG(INFO) << "["<<elapsed() - t0<<" s] Setting parameter configuration  on index " <<selected_params.c_str();
-
-        params.set_index_parameters (index, selected_params.c_str());
+        if(selected_params.size() !=0)
+          params.set_index_parameters (index, selected_params.c_str());
 
         if(pp) {
           LOG(INFO) <<"IndexIVFPQ->polysemous_ht: "<< pp->polysemous_ht;
@@ -213,14 +220,14 @@ if (FLAGS_make_index) {
         double t2 = elapsed();
 
         std::cout << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e6<<" us, "<<(t2 - t1)*1e6/(nq*loop)<<" us each query"
-          <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop) << "\n";
+          <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop) <<",args="<< selected_params <<"\n";
         if(pp) {
           printf("indexIVFPQ_stats.n_hamming_pass:%ld,nrefine:%ld,search_cycles:%ld,refine_cycles:%ld\n",
                indexIVFPQ_stats.n_hamming_pass,indexIVFPQ_stats.nrefine,indexIVFPQ_stats.search_cycles,
                indexIVFPQ_stats.refine_cycles);
-          printf("indexIVF_stats.nq:%ld,nlist:%ld,ndis:%ld,nheap_updates:%ld,quantization_time:%.3f ms,search_time:%.3f ms, hamming_jump_rate:%.5f,nprobe=%d\n",
-               indexIVF_stats.nq,indexIVF_stats.nlist,indexIVF_stats.ndis,indexIVF_stats.nheap_updates,
-               indexIVF_stats.quantization_time,indexIVF_stats.search_time,
+          printf("indexIVF_stats.nq:%ld,nlist:%ld,ndis:%ld,nheap_updates:%ld,quantization_time:%.2f ms,search_time:%.2f ms, hamming_jump_rate:%.2f,nprobe=%d\n",
+               indexIVF_stats.nq,indexIVF_stats.nlist/(nq*loop),indexIVF_stats.ndis/(nq*loop),indexIVF_stats.nheap_updates/(nq*loop),
+               indexIVF_stats.quantization_time/(nq*loop),indexIVF_stats.search_time/(nq*loop),
                indexIVF_stats.ndis==0?0.0:(1.0-indexIVFPQ_stats.n_hamming_pass*1.0/indexIVF_stats.ndis),pp->nprobe);
           indexIVFPQ_stats.reset();
           indexIVF_stats.reset();

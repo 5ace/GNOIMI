@@ -1,4 +1,5 @@
 #include "tool/utils.h"
+#include <faiss/utils/distances.h>
 #include <gflags/gflags.h>
 DEFINE_string(input_file,"","input file fvecs or bvecs");
 DEFINE_uint64(N,0,"read num from file");
@@ -20,7 +21,7 @@ int main(int argc, char** argv) {
         gnoimi::print_elements((int*)(ptr.get())+i*d,d);
       else
         gnoimi::print_elements(ptr.get()+i*d,d);
-
+      LOG(INFO) << "norml2:" << faiss::fvec_norm_L2sqr(ptr.get()+i*d,d) ;
     }
     return 0;
 }

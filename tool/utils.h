@@ -313,10 +313,10 @@ double elapsed ()
 inline std::shared_ptr<float> read_bfvecs(std::string file, size_t &d, size_t& n, bool normalized) {
   float *p =nullptr;
   if(end_with(file,".bvecs")) {
-    LOG(INFO) << " read .bvec " << file;
+    LOG(INFO) << " read .bvec " << file <<",num:"<< n;
     p = b2fvecs_read(file.c_str(), d, n);
   }else if(end_with(file,".fvecs") || end_with(file,".ivecs")) {
-    LOG(INFO) << " read .fvec or ivecs" << file;
+    LOG(INFO) << " read .fvec or ivecs" << file <<",num:"<<n;
     p = fvecs_read(file.c_str(), &d, &n);
   }
   CHECK(p!=nullptr) << " not want format .bvec or .fvec";
