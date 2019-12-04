@@ -46,6 +46,7 @@ DEFINE_bool(direct_train_s_t_alpha,false,"false = alreay train coarse fine and a
 DEFINE_bool(train_pq,true,"is train pq");
 DEFINE_bool(train_opq,true,"分2种情况1.跟faiss一样用原始向量训练opq；2.用残差训练opq、用残差*opq训练pq；这里设置true就是方法2用残差训练opq");
 DEFINE_bool(train_lopq,false,"每个一级倒排链单独训练一个pq和opq旋转矩阵,faiss每个kmeans最少需要40*k=10240,4000个倒排链最好是5000w训练数据，每个倒排链分配1万多个训练数据");
+DEFINE_bool(train_lopq_global_o,false,"如果为true则所有倒排链公用一个o,每个一级倒排链只单独一个pq");
 DEFINE_int32(lopq_train_coarse_start,-1,"可选值0,..K-1,-1 means all");
 DEFINE_int32(lopq_train_coarse_end,-1,"可选值1,..K,-1 means all 主要为了分布式计算,[lopq_train_coarse_start,lopq_train_coarse_end)");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀，最好单独放到一个目录下");
@@ -504,6 +505,10 @@ int main(int argc, char** argv) {
     // 计算残差
     update_residuls();
 
+    if(FLAGS_train_lopq) {
+      CHECK(FLAGS_train_opq == false && FLAGS_train_pq == false);
+    }
+
     if(FLAGS_train_opq) {
       LOG(INFO) << "train opq start ==== ";
       faiss::OPQMatrix opq(D,FLAGS_M);
@@ -554,6 +559,15 @@ int main(int argc, char** argv) {
         LOG(INFO) << "no coarse_centers";
         return 0;
       }
+      std::shared_ptr<float> global_o;
+      if(FLAGS_train_lopq_global_o == true) {
+        LOG(INFO) << "load global o from " << opq_matrix_file;
+        uint64_t d = 0;
+        uint64_t size = 0;
+
+        global_o.reset(gnoimi::fvecs_read(opq_matrix_file.c_str(),&d,&size));
+        LOG(INFO) << "load global o from " << opq_matrix_file << ", d:"<<d <<",size:"<<size;
+      }
       // 相同一级聚类的residual拷贝到一起
       vector<float> train_residual; 
       for(auto coarse_center : coarse_centers) {
@@ -573,8 +587,19 @@ int main(int argc, char** argv) {
           LOG(ERROR) << "docnum:"<< coarse_doc_num[coarse_center] << " < 256,for coarse:"<<coarse_center;
           continue;
         }
-        train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
-        LOG(INFO) << "finish train lopq of " << coarse_center;
+        if(FLAGS_train_lopq_global_o ==false) {
+          //每个倒排链单独训练opq,然后旋转残差
+          LOG(INFO) << "start train lopq of " << coarse_center;
+          train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
+          LOG(INFO) << "finish train lopq of " << coarse_center;
+        } else {
+          //大家公用一个opq，直接旋转计算残差
+          LOG(INFO) << "no need train lopq use global one,R*r directly";
+          float * r = new float[coarse_doc_num[coarse_center] * D];
+          fmat_mul_full(global_o.get(), train_residual.data(), D, coarse_doc_num[coarse_center], D, "TN", r);
+          memcpy(train_residual.data(),r,sizeof(float)*coarse_doc_num[coarse_center]*D);
+          delete[] r;
+        }
 
         LOG(INFO) << "start train pq of " << coarse_center;
         train_pq(coarse_doc_num[coarse_center], train_residual.data(), 

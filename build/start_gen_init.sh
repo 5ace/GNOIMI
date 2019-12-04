@@ -8,3 +8,5 @@ nohup ./gen_init_data --train_file=./sift1B/sift_learn.bvecs --n=1000000 --use_y
 #./gen_init_data --train_file=mmu0.5b/mmu0.5b_learn.99w.fvecs  --n=0 --use_yael=true --iter_num=30 --thread_num=50 --d=128 --k=4096 --coarse_centriods_file=mmu0.5b/coarse_centroids_init_d128_k4096_residual_opq_yael.fvecs --residual_centriods_file=mmu0.5b/fine_centroids_init_d128_k4096_residual_opq_yael.fvecs &>log.init.yael.k4096_residual_opq.mmu0.5b
 
 ./gen_init_data --train_file=mmu0.5b/20191109_0.0997b.fvecs  --n=10000000 --use_yael=true --iter_num=40 --thread_num=50 --d=128 --k=2048 --coarse_centriods_file=mmu0.5b/coarse_centroids_init_d128_k2048_residual_opq_yael.fvecs --residual_centriods_file=mmu0.5b/fine_centroids_init_d128_k2048_residual_opq_yael.fvecs &>log.init.yael.k2048_residual_opq.mmu0.5b
+
+./gen_init_data --train_file=mmu0.5b/20191109_0.0997b.fvecs  --n=10000000 --use_yael=true --iter_num=40 --thread_num=50 --d=128 --k=3072 --coarse_centriods_file=mmu0.5b/coarse_centroids_init_d128_k3072_residual_opq_yael.fvecs --residual_centriods_file=mmu0.5b/fine_centroids_init_d128_k3072_residual_opq_yael.fvecs &>log.init.yael.k3072_residual_opq.mmu0.5b

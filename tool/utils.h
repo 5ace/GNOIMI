@@ -22,6 +22,7 @@
 #include <glog/logging.h>
 #include <faiss/Clustering.h>
 #include <faiss/utils/distances.h>
+
 #include <faiss/IndexFlat.h>
 
 
@@ -175,6 +176,17 @@ static long xvecs_fsize(uint64_t unitsize, const char * fname, size_t *d_out, si
 long bvecs_fsize (const char * fname, size_t *d_out, size_t *n_out)
 {
     return xvecs_fsize (sizeof(unsigned char), fname, d_out, n_out);
+}
+
+long bfvecs_fsize(const char * fname, size_t *d_out, size_t *n_out) {
+    if(end_with(fname,".fvecs")) {
+      return xvecs_fsize (sizeof(float), fname, d_out, n_out);
+    } else if(end_with(fname,".bvecs")) {
+      return xvecs_fsize (sizeof(unsigned char), fname, d_out, n_out);
+    } else {
+      LOG(ERROR) << " not recognize file format " << fname;
+      return -1;
+    }
 }
 
 int b2fvec_fread (FILE * f, float * v)
