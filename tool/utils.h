@@ -63,6 +63,19 @@ int ivecs_new_read (const char *fname, int *d_out, int **vi);
 
 
 namespace gnoimi {
+
+void compute_distance_table(const float *x, const float* center, float* dis_table, size_t M, 
+  size_t dsub, size_t ksub) {
+    size_t m = 0;
+    for(m = 0; m < M; ++m) {
+      faiss::fvec_L2sqr_ny( dis_table + m * ksub,
+                            x + m * dsub,
+                            center + m * ksub * dsub,
+                            dsub,
+                            ksub);      
+    }
+}
+
 inline bool end_with (const std::string& a, const std::string& b) {
   return a.size()>=b.size() && a.compare(a.size()-b.size(),b.size(),b) == 0;
 }

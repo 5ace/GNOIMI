@@ -45,7 +45,7 @@ DEFINE_uint64(learn_N,0,"want read vectors num");
 DEFINE_uint64(query_N,0,"want read vectors num");
 DEFINE_string(index_factory_str,"","like IMI2x8,PQ8+16");
 DEFINE_bool(make_index,false,"制作index");
-DEFINE_bool(search_index,false,"是否查询index");
+DEFINE_bool(search_index,true,"是否查询index");
 DEFINE_string(groundtruth_file,"","file content vectors to learn,format:ivecs");
 DEFINE_string(query_file,"","file content vectors to learn,format:ivecs");
 DEFINE_bool(query_single,true,"为了保证可比性，与gnoimi一样单个query查询，避免faiss的batch加速");
@@ -219,7 +219,7 @@ if (FLAGS_make_index) {
         }
         double t2 = elapsed();
 
-        std::cout << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e6<<" us, "<<(t2 - t1)*1e6/(nq*loop)<<" us each query"
+        std::cout << "["<<elapsed() - t0<<" s] Compute recalls, query "<<nq*loop<<", cost:"<<(t2 - t1)*1e3<<"ms, "<<(t2 - t1)*1e3/(nq*loop)<<"ms each query"
           <<",doc compare/q:" << indexIVF_stats.ndis*1.0/(nq*loop) <<",args="<< selected_params <<"\n";
         if(pp) {
           printf("indexIVFPQ_stats.n_hamming_pass:%ld,nrefine:%ld,search_cycles:%ld,refine_cycles:%ld\n",
@@ -239,19 +239,45 @@ if (FLAGS_make_index) {
         }
         // evaluate result by hand.
         int n_1 = 0, n_10 = 0, n_100 = 0;
+        size_t hit_num = 0;
+        int limit = std::min(std::min((int)gt_d,(int)k),100);
+        // 遍历所有query
         for(int i = 0; i < nq; i++) {
             int gt_nn = gt[i * gt_d];
+            // 遍历每个query的topk
             for(int j = 0; j < k; j++) {
                 if (I[i * k + j] == gt_nn) {
                     if(j < 1) n_1++;
                     if(j < 10) n_10++;
                     if(j < 100) n_100++;
                 }
+                if(j < limit) {
+                  for(int n = 0; n < limit; n++) {
+                    if(I[i * k + j] == gt[i * gt_d + n]) {
+                      hit_num++;
+                      break;
+                    }
+                  }
+                }
             }
         }
-        std::cout <<"R@1 = " << n_1 / float(nq) << "\n";
-        std::cout <<"R@10 = " << n_10 / float(nq) << "\n";
-        std::cout <<"R@100 = " << n_100 / float(nq) << "\n";
+        std::cout <<"R@1:" << n_1 / float(nq) << "\n";
+        std::cout <<"R@10:" << n_10 / float(nq) << "\n";
+        std::cout <<"R@100:" << n_100 / float(nq) << "\n";
+        std::cout <<"SameInTop"<<limit<<":" << float(hit_num)/nq/limit << "\n";
+        
+        {
+            char query_result_ctr[2048];
+            sprintf(query_result_ctr,"%s.%s.queryresult.ivecs",
+              FLAGS_index_file.c_str(),
+              selected_params.c_str());
+            string query_result(query_result_ctr);
+            vector<int> qr(nq * FLAGS_topk);
+            for(int i = 0; i < nq * FLAGS_topk; i++) {
+                qr[i] = int(I[i]); 
+            }
+            ivecs_write(query_result.c_str(), FLAGS_topk, nq, qr.data());
+            LOG(INFO) << "write query result to " << query_result;
+        }
     }
-    LOG(INFO) << "finish";
 }

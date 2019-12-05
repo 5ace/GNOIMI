@@ -46,6 +46,7 @@ DEFINE_uint64(K,4096,"coarse and residual centriods num");
 DEFINE_uint64(D,128,"feature dim");
 DEFINE_uint64(M,16,"PQ's subvector num");
 DEFINE_uint64(N,1000000000,"index vectors num");
+DEFINE_uint64(topk,100,"返回结果的topk");
 DEFINE_int64(L,32,"coarse search num for GNOIMI");
 DEFINE_int32(rerankK,256,"PQ number of bit per subvector index,");
 DEFINE_int32(threadsCount,10,"thread num");
@@ -118,6 +119,7 @@ struct Searcher {
   bool is_lopq = false; //是否每个倒排链独立o
   bool is_lpq = false; //是否每个倒排链独立pq
   std::vector<faiss::IndexPQ*> lpqs; //每个倒排链各自存储的pq 是个数组
+  uint64_t compute_table_docnum_threshold;//查询时倒排链长度大于这个就用查表法
 
   Searcher(string model_prefix,string index_prefix,string lpq_file_prefix, uint64_t D,uint64_t K, uint64_t M, int rerankK,int threadsCount) {
     pq = nullptr;
@@ -128,6 +130,8 @@ struct Searcher {
     this->D = D;
     this->K = K;
     this->M = M;
+    // 累加距离的时候默认就是4的倍数了
+    CHECK( M % 4 == 0 );
     this->rerankK = rerankK;
     this->threadsCount = threadsCount;
     subDim = this->D / this->M;
@@ -144,7 +148,8 @@ struct Searcher {
     // 加载模型数据
     CHECK(ReadAndPrecomputeVocabsData()); 
     ivf.resize(K*K);
-    LOG(INFO) << "Searcher construct ok";
+    compute_table_docnum_threshold = 1.7 * rerankK;
+    LOG(INFO) << "Searcher construct ok,is_lpq:"<< is_lpq <<",is_lopq:" << is_lopq <<", compute_table_docnum_threshold:"<< compute_table_docnum_threshold;
   }
   void LoadCellEdgesPart(int startId, int count) {
     std::ifstream inputCellEdges(cellEdgesFilename.c_str(), ios::binary | ios::in);
@@ -619,7 +624,7 @@ struct Searcher {
   }
   uint64_t SearchNearestNeighbors(float* x,
                               int n, int L, int nprobe, int neighborsCount, 
-                              vector<vector<std::pair<float, int> > >& result, uint64_t start_id) {
+                              vector<vector<std::pair<float, int> > >& result, uint64_t start_id, uint64_t topk) {
     result.resize(n);
     //result查询结果每个query保存neighborsCount个结果
     thread_local vector<int> cellids;
@@ -641,6 +646,8 @@ struct Searcher {
     //}
     uint64_t travel_doc = 0;
     float* cellVocab = rerankVocabs;
+
+
     for(int qid = 0; qid < n; ++qid) {
         result[qid].resize(neighborsCount, std::make_pair(std::numeric_limits<float>::max(), -1));
         float* query_residual = residuals.data() + qid * nprobe * D;
@@ -689,25 +696,49 @@ struct Searcher {
             dis_computer.reset(pq_with_data->get_distance_computer());
             dis_computer->set_query(cell_residual);
           }
-          for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
-            result[qid][found].second = index[id].pointId;
-            result[qid][found].first = 0.0;
-            float diff = 0.0;
-            //实时计算查询向量和索引编码的距离
-            for(int m = 0; m < M; ++m) {
-              float* codeword = cellVocab + m * rerankK * subDim + index[id].bytes[m] * subDim;
-              float* residualSubvector = cell_residual + m * subDim;
-              for(int d = 0; d < subDim; ++d) {
-                // 实时计算查询向量和对应编码类中心的距离
-                diff = residualSubvector[d] - codeword[d];
-                result[qid][found].first += diff * diff;
+          //TODO:@zhangcunyi 长倒排链用查标累加法，短倒排链直接计算这个临界值我觉得大概是rerankK*2 = 512
+          if(cellFinish - cellStart >= compute_table_docnum_threshold && neighborsCount - found >= compute_table_docnum_threshold) {
+              thread_local vector<float> table(M * rerankK);
+              gnoimi::compute_distance_table(cell_residual, cellVocab, table.data(), M, subDim, rerankK);
+              for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
+                result[qid][found].second = index[id].pointId;
+                result[qid][found].first = 0.0;
+                float sum0 = 0.0; float sum1 = 0.0; float sum2 = 0.0; float sum3 = 0.0;
+                // M是4的倍数这个是强制条件初始化的时候会CHECK
+                unsigned char* bytes = index[id].bytes;
+                for(size_t m = 0; m < M; m += 4) {
+                    sum0 += table[rerankK * m + bytes[m]];
+                    sum1 += table[rerankK * (m + 1) + bytes[m + 1]];
+                    sum2 += table[rerankK * (m + 2) + bytes[m + 2]];
+                    sum3 += table[rerankK * (m + 3) + bytes[m + 3]];
+                }
+                result[qid][found].first = sum0 + sum1 + sum2 + sum3;
+                ++found;
               }
-              //result[qid][found].first += faiss::fvec_L2sqr(residualSubvector, codeword, subDim);
+          } else {
+            for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
+                result[qid][found].second = index[id].pointId;
+                result[qid][found].first = 0.0;
+                //实时计算查询向量和索引编码的距离
+                for(size_t m = 0; m < M; ++m) {
+                  float* codeword = cellVocab + m * rerankK * subDim + index[id].bytes[m] * subDim;
+                  float* residualSubvector = cell_residual + m * subDim;
+                  //for(int d = 0; d < subDim; ++d) {
+                  //  // 实时计算查询向量和对应编码类中心的距离
+                  //  float diff = residualSubvector[d] - codeword[d];
+                  //  result[qid][found].first += diff * diff;
+                  //}
+                  result[qid][found].first += faiss::fvec_L2sqr(residualSubvector, codeword, subDim);
+                }
+                ++found;
             }
-            ++found;
           }
         }
-        std::sort(result[qid].begin(), result[qid].end());
+        if(topk + 1000 >= result[qid].size()) {
+          std::sort(result[qid].begin(), result[qid].end());
+        } else {
+          std::partial_sort(result[qid].begin(), result[qid].begin() + topk , result[qid].end());
+        }
         LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
           << empty_cell_num << " found " << found ;
         //for(int z = 0; z < 10 && z < result[qid].size();z++) {
@@ -718,7 +749,7 @@ struct Searcher {
         search_stats.nprobe += check_cell_num; 
     }
     double t2 = elapsed();
-    LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1000/n <<" ms, pq cost:" << (t2-t1)*1000/n << ",total:" << (t2-t0)*1000/n;
+    LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1000/n <<"ms, pq cost:" << (t2-t1)*1000/n << "ms,total:" << (t2-t0)*1000/n;
     search_stats.pq_cost += (t2-t1)*1000;
     search_stats.ivf_cost += (t1-t0)*1000;
     return travel_doc;
@@ -827,7 +858,7 @@ void SearchNearestNeighbors_MultiPQ(const Searcher& searcher,
 }
 #endif
 
-float computeRecallAt(const vector<vector<std::pair<float, int> > >& result,
+float computeRecall1At(const vector<vector<std::pair<float, int> > >& result,
                       const int* groundtruth, int R, uint64_t gt_d) {
   int limit = (R < result[0].size()) ? R : result[0].size();
   int positive = 0;
@@ -845,17 +876,41 @@ float computeRecallAt(const vector<vector<std::pair<float, int> > >& result,
   }
   return (float(positive) / result.size());
 }
+
+//检索结果top R有在gt的top R中的比例
+float computeRecallTopRinGT(const vector<vector<std::pair<float, int> > >& result,
+                      const int* groundtruth, int R, uint64_t gt_d) {
+  int limit = (R < result[0].size()) ? R : result[0].size();
+  uint64_t hit_num = 0;
+  // 遍历所有query
+  for(int i = 0; i < result.size(); ++i) {
+    // 遍历query的top limit个结果
+    for(int j = 0; j < limit; ++j) {
+      // 看看在不在该query的top limit中
+      for(int k = 0; k < limit; ++k) {
+        if(result[i][j].second == groundtruth[i*gt_d +k]) {
+          hit_num++;
+          break;
+        }
+      }
+    }
+  }
+  return (float(hit_num) / result.size() / limit);
+}
 void ComputeRecall(const vector<vector<std::pair<float, int> > >& result,
                    const int* groundtruth, uint64_t gt_d) {
     int R = 1;
-    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ": " << 
-                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
+    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ":" << 
+                 computeRecall1At(result, groundtruth, R, gt_d) << "\n";
     R = 10;
-    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ": " << 
-                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
+    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ":" << 
+                 computeRecall1At(result, groundtruth, R, gt_d) << "\n";
     R = 100;
-    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ": " << 
-                 computeRecallAt(result, groundtruth, R, gt_d) << "\n";
+    std::cout << std::fixed << std::setprecision(5) << "R@" << R << ":" << 
+                 computeRecall1At(result, groundtruth, R, gt_d) << "\n";
+
+    std::cout << std::fixed << std::setprecision(5) << "SameInTop" << 100 << ":" << 
+                 computeRecallTopRinGT(result, groundtruth, 100, gt_d) << "\n";
 }
 
 int main(int argc, char** argv) {
@@ -871,6 +926,7 @@ int main(int argc, char** argv) {
     CHECK(M == FLAGS_M);
     CHECK(FLAGS_rerankK == 256) << "rerankK must = 256";
     CHECK(FLAGS_L >= 0 && FLAGS_L <= FLAGS_K );
+    CHECK(FLAGS_neighborsCount > FLAGS_topk);
     LOG(INFO) << "sizeof Record " << sizeof(Record);
 
     // 初始化
@@ -958,10 +1014,11 @@ int main(int argc, char** argv) {
     #pragma omp parallel for num_threads(FLAGS_threadsCount)
     for(uint64_t i = 0 ; i< queriesCount; i++) {
       vector<vector<std::pair<float, int> > > result;
-      search_stats.travel_doc += searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i);
+      search_stats.travel_doc += searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i, FLAGS_topk);
       results[i]  = result[0];
       LOG(INFO) << "query finish " << i << ", result:" << result[0][0].second;
     }
+
     double t1 = elapsed();
     std::cout.setf(ios::fixed);//precision控制小数点后的位数
     std::cout.precision(2);//后2位
@@ -975,5 +1032,25 @@ int main(int argc, char** argv) {
         << ",gt_in_retrievaled:" << search_stats.gt_in_retrievaled*1.0/queriesCount << "\n";
     }
     ComputeRecall(results, groundtruth.get(),gt_d); 
+    
+    //保存查询结果
+    {
+      char query_result_ctr[2048];
+      sprintf(query_result_ctr,"%s.k%d.l%d.ne%d.np%d.queryresult.ivecs",
+        FLAGS_index_prefix.c_str(),FLAGS_K,FLAGS_L,
+        FLAGS_neighborsCount,FLAGS_nprobe);
+      string query_result(query_result_ctr);
+
+      vector<int> qr(queriesCount * FLAGS_topk);
+      for(int i = 0; i < results.size(); i++) {
+        CHECK(results[i].size() >= FLAGS_topk) <<"query " << i <<", candi num:" << results[i].size() 
+          << " < " << FLAGS_topk;
+          for(int j = 0; j< FLAGS_topk;j++){
+            qr[i * FLAGS_topk + j] = results[i][j].second;
+          }
+      }
+      ivecs_write(query_result.c_str(), FLAGS_topk, queriesCount ,qr.data());
+      LOG(INFO) << "write query result to " << query_result;
+    }
     return 0;
 }

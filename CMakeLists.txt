@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 2.6)
 
 find_package(LAPACK)
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -std=c++11 -m64 -lpthread -lopenblas -lgomp -lgflags -fopenmp")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -std=c++11 -m64")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -std=c++11 -m64 -lpthread -lopenblas -lgomp -lgflags -fopenmp -msse4 -mavx2")
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -std=c++11 -m64")
 
 SET(YAEL_DIR ${CMAKE_SOURCE_DIR}/../yael_v438)
 SET(YAEL_LIB ${CMAKE_SOURCE_DIR}/../yael_v438/yael)
@@ -53,3 +53,6 @@ TARGET_LINK_LIBRARIES (faiss_search_index yael ${LAPACK_LIBRARIES} libfaiss.a li
 #########################################################################################
 ADD_EXECUTABLE (kmeans kmeans.cpp)
 TARGET_LINK_LIBRARIES (kmeans yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (test_matrix_perf test_matrix_perf.cpp)
+TARGET_LINK_LIBRARIES (test_matrix_perf yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
