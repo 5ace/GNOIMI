@@ -589,7 +589,7 @@ int main(int argc, char** argv) {
         }
         if(FLAGS_train_lopq_global_o ==false) {
           //每个倒排链单独训练opq,然后旋转残差
-          LOG(INFO) << "start train lopq of " << coarse_center;
+          LOG(INFO) << "start train lopq of " << coarse_center <<",doc_num:" << coarse_doc_num[coarse_center];
           train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
           LOG(INFO) << "finish train lopq of " << coarse_center;
         } else {
@@ -601,7 +601,7 @@ int main(int argc, char** argv) {
           delete[] r;
         }
 
-        LOG(INFO) << "start train pq of " << coarse_center;
+        LOG(INFO) << "start train pq of " << coarse_center <<", doc_num:" << coarse_doc_num[coarse_center];
         train_pq(coarse_doc_num[coarse_center], train_residual.data(), 
           lpq_file_prefix+"_"+std::to_string(coarse_center)+".pq_matrix.fvecs",
           lpq_file_prefix+"_"+std::to_string(coarse_center)+".pq.faiss.index");

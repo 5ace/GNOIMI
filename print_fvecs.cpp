@@ -10,6 +10,15 @@ int main(int argc, char** argv) {
     FLAGS_logtostderr = true; //日志全部输出到标准错误
     
     CHECK(gnoimi::end_with(FLAGS_input_file,"vecs"));
+    {
+      size_t dout,nout;
+      if(gnoimi::end_with(FLAGS_input_file,".bvecs")) {
+        gnoimi::xvecs_fsize(sizeof(char),FLAGS_input_file.c_str(),&dout,&nout);
+      } else {
+        gnoimi::xvecs_fsize(sizeof(float),FLAGS_input_file.c_str(),&dout,&nout);
+      }
+      LOG(INFO) << "file:" << FLAGS_input_file <<",contains:"<<nout<<" vecs dim "<< dout;
+    }
     bool is_ivecs = gnoimi::end_with(FLAGS_input_file,".ivecs");
     size_t d = 0;
     auto ptr = gnoimi::read_bfvecs(FLAGS_input_file,d,FLAGS_N,false);

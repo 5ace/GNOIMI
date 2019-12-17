@@ -19,6 +19,7 @@ DEFINE_string(kmeans_file,"","out kmeans, .fvecs");
 DEFINE_uint64(k,0,"kmean num");
 DEFINE_uint64(thread_num,20,"threadnum");
 DEFINE_uint64(redo,1,"redo");
+DEFINE_uint64(iter,0,"iternum");
 
 
 int main(int argc, char** argv) {
@@ -39,12 +40,12 @@ int main(int argc, char** argv) {
     std::unique_ptr<float> residual_centroids(new float[FLAGS_d*FLAGS_k]);
     std::unique_ptr<int> closest_id_int(new int[FLAGS_n]);
     std::unique_ptr<float> closest_dis(new float[FLAGS_n]);
-    std::unique_ptr<int>   nassign(new int[FLAGS_k]);
+    std::unique_ptr<int>   nassign(new int[FLAGS_n]);
 
-    float error = kmeans(FLAGS_d,FLAGS_n,FLAGS_k,0,features.get(),
+    float error = kmeans(FLAGS_d,FLAGS_n,FLAGS_k,FLAGS_iter,features.get(),
       FLAGS_thread_num,1234,FLAGS_redo,coarse_centroids.get(),closest_dis.get(),closest_id_int.get(),nassign.get());
 
-    LOG(INFO) << "kmeans finish,error:"<<error;
+    LOG(INFO) << "kmeans finish,error:"<<error<<",write file to " << FLAGS_kmeans_file;
     fvecs_write(FLAGS_kmeans_file.c_str(),FLAGS_d,FLAGS_k,coarse_centroids.get());
     return 0;
 }

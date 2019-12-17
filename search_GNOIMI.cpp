@@ -34,7 +34,7 @@ using std::string;
 using std::vector;
 using namespace gnoimi;
 
-#define GNOIMI_QUERY_DEBUG
+//#define GNOIMI_QUERY_DEBUG
 
 DEFINE_string(groud_truth_file,"","format ivec");
 DEFINE_string(query_filename,"","format fvec");
@@ -64,6 +64,7 @@ struct SearchStats {
   int gt_in_retrievaled = 0; // gt被遍历过的query 个数
   double ivf_cost = 0.0; //ms
   double pq_cost = 0.0; //ms
+  double opq_cost = 0.0;
   uint64_t travel_doc = 0;
   uint64_t nprobe = 0;
 
@@ -72,6 +73,7 @@ struct SearchStats {
     gt_in_retrievaled = 0;
     ivf_cost = 0.0;
     pq_cost = 0.0;
+    opq_cost = 0.0;
     travel_doc = 0;
     nprobe = 0;
   }
@@ -148,7 +150,7 @@ struct Searcher {
     // 加载模型数据
     CHECK(ReadAndPrecomputeVocabsData()); 
     ivf.resize(K*K);
-    compute_table_docnum_threshold = 1.7 * rerankK;
+    compute_table_docnum_threshold = 1.3 * rerankK;
     LOG(INFO) << "Searcher construct ok,is_lpq:"<< is_lpq <<",is_lopq:" << is_lopq <<", compute_table_docnum_threshold:"<< compute_table_docnum_threshold;
   }
   void LoadCellEdgesPart(int startId, int count) {
@@ -666,24 +668,30 @@ struct Searcher {
               break;
           }
 
-          check_cell_num++;
-
           if(cellStart == cellFinish) {
             empty_cell_num++;
             continue;
           }
-
+          check_cell_num++;
+          #ifdef GNOIMI_QUERY_DEBUG
           if(grouth_cellid.size() != 0) {
             if(grouth_cellid[start_id + qid] == cellId) {
               search_stats.gt_in_retrievaled++; 
               LOG(INFO) << "GT CELL query:" << start_id + qid << ", hit retrieval cell:" << cellId;
             }
           }
+          #endif
           float* cell_residual = query_residual + i * D;
           if(is_lopq) {
             //LOG(INFO) << "[LPQ] lopq cellId:" << cellId <<",coarseId:" << GetCoarseIdFromCellId(cellId);
             //每个残差单独o
+            #ifdef GNOIMI_QUERY_DEBUG
+            double tt1 = elapsed();
+            #endif
             LopqMatrix(cell_residual, 1, GetCoarseIdFromCellId(cellId));
+            #ifdef GNOIMI_QUERY_DEBUG
+            search_stats.opq_cost += (elapsed() - tt1); 
+            #endif
           }
 
           if(is_lpq) {
@@ -692,10 +700,6 @@ struct Searcher {
             cellVocab = lpqRerankVocabs + GetCoarseIdFromCellId(cellId) * D * rerankK;
           }
           std::unique_ptr<faiss::DistanceComputer> dis_computer;
-          if(pq_with_data != nullptr) {
-            dis_computer.reset(pq_with_data->get_distance_computer());
-            dis_computer->set_query(cell_residual);
-          }
           //TODO:@zhangcunyi 长倒排链用查标累加法，短倒排链直接计算这个临界值我觉得大概是rerankK*2 = 512
           if(cellFinish - cellStart >= compute_table_docnum_threshold && neighborsCount - found >= compute_table_docnum_threshold) {
               thread_local vector<float> table(M * rerankK);
@@ -739,19 +743,17 @@ struct Searcher {
         } else {
           std::partial_sort(result[qid].begin(), result[qid].begin() + topk , result[qid].end());
         }
-        LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
-          << empty_cell_num << " found " << found ;
-        //for(int z = 0; z < 10 && z < result[qid].size();z++) {
-        //  LOG(INFO) << "query:" << start_id+qid << ",match "<<z <<"th:" <<result[qid][z].second <<","<< ",score:"
-        //  <<result[qid][z].first;
-        //}
+        //LOG(INFO) << "query " << qid << " check_cell_num "<< check_cell_num << " empty_cell_num "
+        //  << empty_cell_num << " found " << found ;
         travel_doc += found;
         search_stats.nprobe += check_cell_num; 
     }
     double t2 = elapsed();
+    #ifdef GNOIMI_QUERY_DEBUG
     LOG(INFO) << "search end, query n:" << n <<", ivf cost:" << (t1-t0)*1000/n <<"ms, pq cost:" << (t2-t1)*1000/n << "ms,total:" << (t2-t0)*1000/n;
-    search_stats.pq_cost += (t2-t1)*1000;
-    search_stats.ivf_cost += (t1-t0)*1000;
+    #endif
+    search_stats.pq_cost += (t2-t1);
+    search_stats.ivf_cost += (t1-t0);
     return travel_doc;
 }
 };
@@ -1024,8 +1026,8 @@ int main(int argc, char** argv) {
     std::cout.precision(2);//后2位
     std::cout << "[COST] ["<< (t1-t0) << " s] query num:" << queriesCount << ",thread_num:" << FLAGS_threadsCount << ",query cost:" << (t1-t0)*1000/queriesCount <<" ms" <<",nprobe:" << nprobe
       << ",L:"<< FLAGS_L <<",top:"<< FLAGS_neighborsCount<< ",travel_doc:"<< search_stats.travel_doc*1.0/queriesCount 
-      << ",ivf cost:" << search_stats.ivf_cost*1.0/queriesCount<<"ms,pq cost:"<< search_stats.pq_cost*1.0/queriesCount
-      << "ms,check ivfs:"<< search_stats.nprobe/queriesCount <<"\n";
+      << ",ivf cost:" << search_stats.ivf_cost*1000/queriesCount<<"ms,pq cost:"<< search_stats.pq_cost*1000/queriesCount
+      << "ms,check ivfs:"<< search_stats.nprobe/queriesCount <<",opq cost:"<<search_stats.opq_cost*1000/queriesCount <<"ms\n";
     std::cout.precision(4);//后4位
     if(FLAGS_print_gt_in_LK) {
       std::cout << "GT cell hit result. query num:" << queriesCount << ",gt_in_LK:" << search_stats.gt_in_LK*1.0/queriesCount
