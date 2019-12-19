@@ -22,6 +22,7 @@
 #include <glog/logging.h>
 #include <faiss/Clustering.h>
 #include <faiss/utils/distances.h>
+#include <faiss/utils/utils.h>
 
 #include <faiss/IndexFlat.h>
 
@@ -61,6 +62,11 @@ int ivecs_new_read (const char *fname, int *d_out, int **vi);
 }
 #endif
 
+void minus_mu(size_t d, size_t n, float *x ,float *mu) {
+  for(size_t i = 0; i < n; i++) {
+    faiss::fvec_madd(d, x + i * d, -1.0f, mu , x + i * d);
+  }
+}
 
 namespace gnoimi {
 

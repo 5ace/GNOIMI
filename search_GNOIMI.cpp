@@ -40,6 +40,7 @@ DEFINE_string(groud_truth_file,"","format ivec");
 DEFINE_string(query_filename,"","format fvec");
 DEFINE_bool(make_index,true,"制作index还是查询index, true:only make index, false: only search index");
 DEFINE_string(model_prefix,"./train_gnoimi_","prefix of model files");
+DEFINE_string(pq_prefix,"","if empty then same as model_prefix");
 DEFINE_string(index_prefix,"./index_gnoimi_","prefix of index files");
 DEFINE_string(base_file,"","file content vectors to index,format:bvecs or fvecs");
 DEFINE_uint64(K,4096,"coarse and residual centriods num");
@@ -53,9 +54,10 @@ DEFINE_int32(threadsCount,10,"thread num");
 DEFINE_int32(nprobe,200," if not in (0,K*L] else  set K*L");
 DEFINE_int32(neighborsCount,5000,"coarse search num for GNOIMI");
 DEFINE_int32(queriesCount,0,"load query count");
-DEFINE_bool(residual_opq,true,"是否是对残差的opq");
+DEFINE_bool(residual_opq,true,"是否是对残差的opq,用原始向量训练一级码本，用残差训练pq；否则是先训练opq，再训练一级码本，再训练pq");
 DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀,如果是空就不用lopq");
+DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
 
 
 std::vector<int> grouth_cellid;
@@ -99,7 +101,9 @@ struct Searcher {
   float* lopqRerankRotation = nullptr;// 每个倒排链一个opq矩阵
   float* rerankVocabs = nullptr;//global pq的码本
   float* lpqRerankVocabs = nullptr; //每个倒排链单独的码本
-  string model_prefix_,index_prefix_;
+  float* gopq_residual_mean = nullptr; //gopq的均值 D维
+  float* lopq_residual_mean = nullptr; //lopq的均值 K * D
+  string model_prefix_,index_prefix_,pq_prefix_;
   uint64_t D;
   uint64_t K;
   uint64_t M;
@@ -114,6 +118,7 @@ struct Searcher {
   string fineCodebookFilename;
   string alphaFilename, rerankRotationFilename, rerankVocabsFilename, cellEdgesFilename,rawIndexFilename,rerankPQFaissFilename,rerankPQFaissWithDataFilename;
   string lpq_file_prefix;
+  string gopq_residual_mean_file;
   
 
   std::vector<uint8_t> codes; //所有doc的pq编码,按照add的顺序存储，与倒排链无关
@@ -123,12 +128,13 @@ struct Searcher {
   std::vector<faiss::IndexPQ*> lpqs; //每个倒排链各自存储的pq 是个数组
   uint64_t compute_table_docnum_threshold;//查询时倒排链长度大于这个就用查表法
 
-  Searcher(string model_prefix,string index_prefix,string lpq_file_prefix, uint64_t D,uint64_t K, uint64_t M, int rerankK,int threadsCount) {
+  Searcher(string model_prefix,string pq_prefix, string index_prefix,string lpq_file_prefix, uint64_t D,uint64_t K, uint64_t M, int rerankK,int threadsCount) {
     pq = nullptr;
     pq_with_data = nullptr;
     index = nullptr;
     model_prefix_ = model_prefix;
     index_prefix_ = index_prefix;
+    pq_prefix_ = pq_prefix.empty() ? model_prefix_ : pq_prefix;
     this->D = D;
     this->K = K;
     this->M = M;
@@ -140,9 +146,10 @@ struct Searcher {
     alphaFilename = model_prefix_ +"alpha.fvecs";
     fineCodebookFilename = model_prefix_ + "fine.fvecs";
     coarseCodebookFilename = model_prefix_ + "coarse.fvecs";
-    rerankRotationFilename = model_prefix_ + "opq_matrix.fvecs";
-    rerankVocabsFilename = model_prefix_ + "pq.fvecs";
-    rerankPQFaissFilename = model_prefix_ + "pq.faiss.index";
+    rerankRotationFilename = pq_prefix_ + "opq_matrix.fvecs";
+    rerankVocabsFilename = pq_prefix_ + "pq.fvecs";
+    rerankPQFaissFilename = pq_prefix_ + "pq.faiss.index";
+    gopq_residual_mean_file = pq_prefix_ + "gopq_residual_mean.fvecs"; // gopq residual 的均值
     rerankPQFaissWithDataFilename = index_prefix_ + "pq.faiss.withdata.index";
     cellEdgesFilename = index_prefix_+ "cellEdges.dat";
     rawIndexFilename = index_prefix_+ "rawIndex.dat"; //作者设计的格式
@@ -221,6 +228,7 @@ struct Searcher {
     CHECK(!access(rerankRotationFilename.c_str(),0));
     CHECK(!access(rerankVocabsFilename.c_str(),0));
 
+
     lpqs.resize(K);
 
     if(!lpq_file_prefix.empty()) {
@@ -257,6 +265,18 @@ struct Searcher {
         memcpy(lpqRerankVocabs + i * rerankK * D,lpqs[i]->pq.centroids.data(), sizeof(float) * rerankK * D);
       }
     }
+    if(FLAGS_pq_minus_mean) {
+      LOG(INFO) << "Load gopq_residual_mean_file:" << gopq_residual_mean_file;
+      gopq_residual_mean = (float*)malloc(sizeof(float) * D);
+      CHECK(fvecs_read(gopq_residual_mean_file.c_str(),D,1,gopq_residual_mean) == 1) << "read file error "<< gopq_residual_mean_file; 
+      if(is_lopq) {
+        lopq_residual_mean = (float*)malloc(sizeof(float) * D * K);
+        for(int i = 0 ;i < K ; i++) {
+          string lopq_residual_mean_file = lpq_file_prefix+"_"+std::to_string(i)+".lopq_residual_mean.fvecs";
+          CHECK(fvecs_read(lopq_residual_mean_file.c_str(), D, 1,lopq_residual_mean + i * D) == 1) << "read file error "<< lopq_residual_mean_file; 
+        }
+      } 
+    }
     LOG(INFO) << "start load Faiss PQ " << rerankPQFaissFilename;
     pq = dynamic_cast<faiss::IndexPQ*>(faiss::read_index(rerankPQFaissFilename.c_str()));
     CHECK(pq->pq.code_size == M);
@@ -276,6 +296,9 @@ struct Searcher {
       LOG(INFO) << "[GLOBAL PQ] opq for coarseVocab and fineVocab";
       OpqMatrix(coarseVocab, FLAGS_K);
       OpqMatrix(fineVocab, FLAGS_K);
+      if(FLAGS_pq_minus_mean) {
+        OpqMatrix(gopq_residual_mean, 1); //也旋转一下均值 R * (q - s - alpha*t  -mu)
+      }
     }
     coarseNorms = (float*) malloc(K * sizeof(float));
     fineNorms = (float*) malloc(K * sizeof(float));
@@ -431,22 +454,39 @@ struct Searcher {
     auto t2 = std::thread( [this,start_id]() {
         int batch_num = residuals.size();
         uint64_t idx = start_id;
+        // 检索回来的残差结果
         for(int j = 0; j < batch_num; j++) {
           auto & batch_residual = residuals[j];
-          int batch_size = batch_residual.size()/D;
+          int batch_size = batch_residual.size() / D;
+
+          if(FLAGS_pq_minus_mean) {
+            //需要减去均值  
+            #pragma omp parallel for
+            for(size_t i = 0; i < batch_size; i++) {
+              if(is_lopq) {
+                //单独o
+                minus_mu(D, 1, batch_residual.data() + i * D, lopq_residual_mean + GetCoarseIdFromCellId(cellids[j][i]) * D);
+              } else {
+                //公用o
+                minus_mu(D, 1, batch_residual.data() + i * D, gopq_residual_mean);
+              }
+            }
+          } 
           if(is_lpq) {
             //遍历每一个残差
             #pragma omp parallel for
-            for(int i = 0; i < batch_size; i++) {
+            for(size_t i = 0; i < batch_size; i++) {
               if(is_lopq) {
+                //单独o
                 //根据此残差的倒排链找到对应的o旋转然后加入code
                 LopqMatrix(batch_residual.data() + i * D, 1, GetCoarseIdFromCellId(cellids[j][i]));
-              }
+              } 
               //pq编码
               lpqs[GetCoarseIdFromCellId(cellids[j][i])] -> pq.compute_code(batch_residual.data() + i * D,
                 &codes[(idx + i) * M]);
             }
           } else {
+            //公用pq 公用o
             pq->pq.compute_codes(batch_residual.data(), &codes[idx * M], batch_size);
           }
           // 计算下一次codes存储的位置
@@ -688,10 +728,19 @@ struct Searcher {
             #ifdef GNOIMI_QUERY_DEBUG
             double tt1 = elapsed();
             #endif
+            if(FLAGS_pq_minus_mean) {
+                //需要减去均值  
+               minus_mu(D, 1, cell_residual, lopq_residual_mean + GetCoarseIdFromCellId(cellId) * D);
+            }
             LopqMatrix(cell_residual, 1, GetCoarseIdFromCellId(cellId));
             #ifdef GNOIMI_QUERY_DEBUG
             search_stats.opq_cost += (elapsed() - tt1); 
             #endif
+          } else {
+            if(FLAGS_pq_minus_mean) {
+                //需要减去均值  
+               minus_mu(D, 1, cell_residual, gopq_residual_mean);
+            }
           }
 
           if(is_lpq) {
@@ -932,7 +981,7 @@ int main(int argc, char** argv) {
     LOG(INFO) << "sizeof Record " << sizeof(Record);
 
     // 初始化
-    Searcher searcher(FLAGS_model_prefix,FLAGS_index_prefix,FLAGS_lpq_file_prefix,FLAGS_D,FLAGS_K,FLAGS_M,FLAGS_rerankK,FLAGS_threadsCount);
+    Searcher searcher(FLAGS_model_prefix,FLAGS_pq_prefix,FLAGS_index_prefix,FLAGS_lpq_file_prefix,FLAGS_D,FLAGS_K,FLAGS_M,FLAGS_rerankK,FLAGS_threadsCount);
 
     if( FLAGS_make_index) {
       LOG(INFO) << "making index";

@@ -19,6 +19,7 @@
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexPQ.h>
 #include <faiss/utils/distances.h>
+#include <faiss/utils/utils.h>
 #include <faiss/VectorTransform.h>
 #include <gflags/gflags.h>
 #include <faiss/index_io.h>
@@ -41,6 +42,7 @@ DEFINE_string(initCoarseFilename,"","initCoarseFilename fvecs, centorids of coar
 DEFINE_string(initFineFilename,"","initFineFilename fvecs, centorids of residual");
 DEFINE_string(learnFilename,"","learnFilename fvecs or bvecs, must normlized");
 DEFINE_string(outputFilesPrefix,"./train_gnoimi_","prefix of output file name");
+DEFINE_string(pqOutputFilesPrefix,"","if empty then same as FLAGS_outputFilesPrefix");
 DEFINE_int32(trainThreadChunkSize,10000,"the dim num for yael fmat_mul_full ");
 DEFINE_bool(direct_train_s_t_alpha,false,"false = alreay train coarse fine and alpha, and read them from file");
 DEFINE_bool(train_pq,true,"is train pq");
@@ -50,6 +52,7 @@ DEFINE_bool(train_lopq_global_o,false,"如果为true则所有倒排链公用一�
 DEFINE_int32(lopq_train_coarse_start,-1,"可选值0,..K-1,-1 means all");
 DEFINE_int32(lopq_train_coarse_end,-1,"可选值1,..K,-1 means all 主要为了分布式计算,[lopq_train_coarse_start,lopq_train_coarse_end)");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀，最好单独放到一个目录下");
+DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
 
 size_t D;
 int K;
@@ -61,6 +64,7 @@ string learnFilename;
 string initCoarseFilename;
 string initFineFilename;
 string outputFilesPrefix;
+string pqOutputFilesPrefix;
 
 int trainThreadChunkSize;
 int threadsCount;
@@ -69,6 +73,7 @@ float* train_vecs;
 float* residual_vecs;
 int* coarseAssigns;
 int* fineAssigns;
+int64_t* assigns;
 float* alphaNum;
 float* alphaDen;
 float* alpha;
@@ -101,9 +106,39 @@ string coarseVocabFilename;
 string pqFileName;
 string pqIndexFileName;
 string opq_matrix_file;
+string gopq_residual_mean_file;
 string lpq_file_prefix;
 
 ///////////////////////////
+float* calc_mean(int d, int n, float *x) {
+   float* mu = new float[d];
+   memset(mu,0,sizeof(float)*d);
+   for(size_t i = 0; i < n; i++) {
+     for(size_t j = 0; j < d ; j++) {
+        mu[j] += x[i * d + j]; 
+     } 
+   } 
+   for(size_t j = 0; j < d ; j++) {
+      mu[j] = mu[j] / n;
+   }
+   return mu;
+}
+
+
+// calc || p -( Sk + alpha * Tl) || ^2
+float disOfCell(int k, int l, float* x) {
+  vector<float> t(D);
+  float *c = coarseVocab + k * D;
+  float *f = fineVocab + l * D;
+  for(int i = 0; i < D; i++) {
+    t[i] = c[i] + alpha[k * K + l] * f[i];
+  }
+  return faiss::fvec_L2sqr(x,t.data(),D); 
+}
+float disOfCell(int k,float* x) {
+  float *c = coarseVocab + k * D;
+  return faiss::fvec_L2sqr(x,c,D); 
+}
 void computeOptimalAssignsSubset(int threadId) {
   long long startId = (totalLearnCount / threadsCount) * threadId;
   int pointsCount = totalLearnCount / threadsCount;
@@ -122,8 +157,10 @@ void computeOptimalAssignsSubset(int threadId) {
     fmat_mul_full(coarseVocab, chunkPoints, K, trainThreadChunkSize, D, "TN", pointsCoarseTerms);
     fmat_mul_full(fineVocab, chunkPoints, K, trainThreadChunkSize, D, "TN", pointsFineTerms);
     for(int pointId = 0; pointId < trainThreadChunkSize; ++pointId) {
-      // 这里想计算|p-S|
-      // 转换为 p*p/2-P*S +S*S,由于对于同一个p,p*p/2=0.5是一样的所以排序时排除即可
+      // 这里想计算|p-S|^2
+      // 转换为 p*p/2-P*S +S*S/2,由于对于同一个p,S*S/2=0.5是一样的所以排序时排除即可
+      
+      // 这里计算的是P*S-p*p/2=tmp真正的l2距离是 -1*tmp*2+1
       cblas_saxpy(K, -1.0, coarseNorms, 1, pointsCoarseTerms + pointId * K, 1);
       for(int k = 0; k < K; ++k) {
         // 这first就是每个查询向量与所有一级类中心的近似距离,S*S/2-p*S
@@ -131,6 +168,17 @@ void computeOptimalAssignsSubset(int threadId) {
         coarseScores[k].second = k;
       }
       std::sort(coarseScores.begin(), coarseScores.end());
+#if 0
+      {
+        for(int i = 0; i < K; i++) {
+          LOG(INFO) << "after sort:" << i << ",k:"<<coarseScores[i].second<<",calc dis:"
+          <<coarseScores[i].first<<","<< coarseScores[i].first * 2 + 1
+          <<",real dis:"<< disOfCell(coarseScores[i].second, chunkPoints + chunkId * D);
+        }
+        exit(0);
+      }
+#endif
+
       float currentMinScore = 999999999.0;
       int currentMinCoarseId = -1;
       int currentMinFineId = -1;
@@ -144,6 +192,7 @@ void computeOptimalAssignsSubset(int threadId) {
           float score = currentCoarseTerm + alphaFactor * coarseFineProducts[currentCoarseId * K + currentFineId] + 
                         (-1.0) * alphaFactor * pointsFineTerms[pointId * K + currentFineId] + 
                         alphaFactor * alphaFactor * fineNorms[currentFineId];
+          //LOG(INFO) << "l:"<< l << ",k:"<< currentFineId << ",l2 dis:"<< score*2+1.0 <<",real dis:" << disOfCell(currentCoarseId, currentFineId, chunkPoints + chunkId * D);
           if(score < currentMinScore) {
             currentMinScore = score;
             currentMinCoarseId = currentCoarseId;
@@ -154,6 +203,7 @@ void computeOptimalAssignsSubset(int threadId) {
       //保留每个训练向量的一级码本，二级码本以及与此码本的欧氏距离
       coarseAssigns[startId + chunkId * trainThreadChunkSize + pointId] = currentMinCoarseId;
       fineAssigns[startId + chunkId * trainThreadChunkSize + pointId] = currentMinFineId;
+      assigns[startId + chunkId * trainThreadChunkSize + pointId] = currentMinCoarseId * K + currentMinFineId;
       errors[threadId] += currentMinScore * 2 + 1.0; // point has a norm equals 1.0
     }
   }
@@ -236,6 +286,7 @@ void init_global_varibles() {
     initCoarseFilename = FLAGS_initCoarseFilename;
     initFineFilename = FLAGS_initFineFilename;
     outputFilesPrefix = FLAGS_outputFilesPrefix;
+    pqOutputFilesPrefix = FLAGS_pqOutputFilesPrefix.empty() ? outputFilesPrefix : FLAGS_pqOutputFilesPrefix;
     trainThreadChunkSize = FLAGS_trainThreadChunkSize; //矩阵相乘的大小
     threadsCount = FLAGS_thread_num;
 
@@ -246,6 +297,7 @@ void init_global_varibles() {
     residual_vecs = (float*)malloc(totalLearnCount * D * sizeof(float));
     coarseAssigns = (int*)malloc(totalLearnCount * sizeof(int));
     fineAssigns = (int*)malloc(totalLearnCount * sizeof(int));
+    assigns = (int64_t*)malloc(totalLearnCount * sizeof(int64_t));
     alphaNum = (float*)malloc(K * K * sizeof(float));
     alphaDen = (float*)malloc(K * K * sizeof(float));
     alpha = (float*)malloc(K * K * sizeof(float));
@@ -285,10 +337,11 @@ void init_global_varibles() {
     alphaFilename = outputFilesPrefix +"alpha.fvecs";
     fineVocabFilename = outputFilesPrefix + "fine.fvecs";
     coarseVocabFilename = outputFilesPrefix + "coarse.fvecs";
-    pqFileName = outputFilesPrefix + "pq.fvecs";
-    pqIndexFileName = outputFilesPrefix + "pq.faiss.index";
-    opq_matrix_file = outputFilesPrefix + "opq_matrix.fvecs";
+    pqFileName = pqOutputFilesPrefix + "pq.fvecs";
+    pqIndexFileName = pqOutputFilesPrefix + "pq.faiss.index";
+    opq_matrix_file = pqOutputFilesPrefix + "opq_matrix.fvecs";
     lpq_file_prefix = FLAGS_lpq_file_prefix;
+    gopq_residual_mean_file = pqOutputFilesPrefix + "gopq_residual_mean.fvecs";
 }
 void update_precompute() {
       //计算每个类中心的内积,用于计算距离使用
@@ -314,7 +367,8 @@ int update_assigns() {
       for(int threadId = 0; threadId < threadsCount; ++threadId) {
         totalError += errors[threadId];
       }
-      LOG(INFO) << "update_assigns finish, Current reconstruction error... " << totalError / totalLearnCount << "\n";
+      LOG(INFO) << "update_assigns finish, Current reconstruction error... " << totalError / totalLearnCount 
+      << ",imbalance:"<<faiss::imbalance_factor(totalLearnCount,K*K,assigns);
       return 0;
 }
 void train_alpha() {
@@ -424,8 +478,8 @@ void update_residuls() {
         coarse_doc_num[coarseAssign]++;
       }
       int fineAssign = fineAssigns[i];
-      float * coarse = coarseVocab + coarseAssign * D;
-      float * fine = fineVocab + fineAssign * D;
+      float* coarse = coarseVocab + coarseAssign * D;
+      float* fine = fineVocab + fineAssign * D;
       float* residual = residual_vecs + i * D;
       float* train = train_vecs + i * D;
       float alpha_i = alpha[coarseAssign*K + fineAssign]; 
@@ -450,25 +504,60 @@ void update_residuls() {
     LOG(INFO) << "[Residual] finish miuns " << sum ;
 }
 //训练opq，保存到save_filename，并且改变训练向量x=R*x
-void train_opq(uint64_t n, float* x, string save_filename) {
+void train_opq(uint64_t n, float* x, string save_filename, string mean_file) {
+      //计算残差均值,并输出到文件
+      std::unique_ptr<float[]> mu(calc_mean(D,n,x));
+      fvecs_write(mean_file.c_str(),D,1,mu.get());
+
       faiss::OPQMatrix opq(D,FLAGS_M);
+      opq.max_train_points = opq.max_train_points * 5;
+      opq.niter = 70;
+      opq.niter_pq = 6;
+
       opq.verbose = true;
       opq.train(n,x);
       fvecs_write(save_filename.c_str(),D,D,opq.A.data());
+
+      if(FLAGS_pq_minus_mean) {
+        LOG(INFO) << "start minus mu";
+        minus_mu(D,n,x,mu.get());
+        LOG(INFO) << "end minus mu";
+      }
       // 旋转残差
-      float * r = new float[n * D];
-      fmat_mul_full(opq.A.data(), x , D, n, D, "TN", r);
-      memcpy(x,r,sizeof(float) * n * D);
-      delete[] r;
+      size_t batch_size = 1000000;
+      size_t batch_num = (n + batch_size - 1) / batch_size;
+      for(size_t i = 0; i < batch_num; i++) {
+         size_t real_size = ((i == batch_num - 1) ? (n - batch_size * (batch_num - 1)) : batch_size);
+         float* r = new float[real_size * D];
+         fmat_mul_full(opq.A.data(), x + i * batch_size * D , D, real_size, D, "TN", r);
+         memcpy(x + i * batch_size * D, r , sizeof(float) * real_size * D);
+         delete[] r;
+      }
 }
 void train_pq(uint64_t n, float* x, string save_matrix_filename, string save_faiss_filename) {
       //开始训练PQ
       faiss::IndexPQ pq(D,FLAGS_M,FLAGS_KK_nbits);
       pq.do_polysemous_training = true;
       pq.verbose = true;
+      pq.pq.cp.max_points_per_centroid = 2000;
+      pq.pq.cp.niter = 40;
+      pq.pq.verbose = true;
       pq.train(n,x);
       fvecs_write(save_matrix_filename.c_str(),pq.pq.dsub,pq.pq.ksub*pq.pq.M,pq.pq.centroids.data());
       faiss::write_index(&pq,save_faiss_filename.c_str());
+
+      float error_sum = 0.0f;
+      #pragma omp parallel for reduction(+:error_sum)
+      for(size_t i = 0; i < n; i++) {
+        vector<uint8_t> code(pq.sa_code_size());
+        vector<float> decode_v(D);
+        pq.sa_encode(1,x + i * D, code.data()); 
+        pq.sa_decode(1,code.data(),decode_v.data());
+        error_sum += faiss::fvec_L2sqr(decode_v.data(),x + i * D,D);
+      }
+      LOG(INFO) << "pq error for n:"<< n <<",minus_mu:"<<FLAGS_pq_minus_mean<<",train_lopq:"<<FLAGS_train_lopq
+      << ",train_lopq_global_o:"<<FLAGS_train_lopq_global_o <<",train_opq:" << FLAGS_train_opq
+      << ",error:" << error_sum / n <<",total_error:" << error_sum;
 }
 int main(int argc, char** argv) {
     gnoimi::print_elements(argv,argc);
@@ -497,9 +586,10 @@ int main(int argc, char** argv) {
       train_alpha();
     } else {
       //读取alpha 
-      fvecs_read(alphaFilename.c_str(), K, K, alpha);
-      fvecs_read(fineVocabFilename.c_str(), D, K, fineVocab);
-      fvecs_read(coarseVocabFilename.c_str(), D, K, coarseVocab);
+      LOG(INFO) << "loading " << alphaFilename <<"," << fineVocabFilename <<"," << coarseVocabFilename;
+      CHECK(fvecs_read(alphaFilename.c_str(), K, K, alpha) == K);
+      CHECK(fvecs_read(fineVocabFilename.c_str(), D, K, fineVocab) == K);
+      CHECK(fvecs_read(coarseVocabFilename.c_str(), D, K, coarseVocab) == K);
     }
     
     // 计算残差
@@ -511,33 +601,14 @@ int main(int argc, char** argv) {
 
     if(FLAGS_train_opq) {
       LOG(INFO) << "train opq start ==== ";
-      faiss::OPQMatrix opq(D,FLAGS_M);
-      opq.verbose = true;
-      opq.train(totalLearnCount,residual_vecs);
-      fvecs_write(opq_matrix_file.c_str(),D,D,opq.A.data());
-      LOG(INFO) << "train opq finish ==== ";
-
-      LOG(INFO) << "calc R*Residual start";
-      // 旋转残差
-      gnoimi::print_elements(residual_vecs,D);
-      float * r = new float[totalLearnCount * D];
-      fmat_mul_full(opq.A.data(), residual_vecs, D, totalLearnCount, D, "TN", r);
-      memcpy(residual_vecs,r,sizeof(float)*totalLearnCount*D);
-      delete[] r;
-      LOG(INFO) << "========R*residual[0] =======";
-      gnoimi::print_elements(residual_vecs,D);
-      LOG(INFO) << "calc R*Residual end";
+      train_opq(totalLearnCount, residual_vecs, opq_matrix_file,gopq_residual_mean_file);
+      LOG(INFO) << "train opq end ==== ";
     }
 
     if(FLAGS_train_pq) {
       //开始训练PQ
       LOG(INFO) << "train PQ start";
-      faiss::IndexPQ pq(D,FLAGS_M,FLAGS_KK_nbits);
-      pq.do_polysemous_training = true;
-      pq.verbose = true;
-      pq.train(totalLearnCount,residual_vecs);
-      fvecs_write(pqFileName.c_str(),pq.pq.dsub,pq.pq.ksub*pq.pq.M,pq.pq.centroids.data());
-      faiss::write_index(&pq,pqIndexFileName.c_str());
+      train_pq(totalLearnCount, residual_vecs, pqFileName, pqIndexFileName);
       LOG(INFO) << "train PQ finish";
     }
 
@@ -588,13 +659,20 @@ int main(int argc, char** argv) {
           continue;
         }
         if(FLAGS_train_lopq_global_o ==false) {
+
           //每个倒排链单独训练opq,然后旋转残差
           LOG(INFO) << "start train lopq of " << coarse_center <<",doc_num:" << coarse_doc_num[coarse_center];
-          train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs");
+          string lopq_residual_mean_file = lpq_file_prefix+"_"+std::to_string(coarse_center)+".lopq_residual_mean.fvecs";
+          train_opq(coarse_doc_num[coarse_center], train_residual.data(), lpq_file_prefix+"_"+std::to_string(coarse_center)+".opq_matrix.fvecs",lopq_residual_mean_file);
           LOG(INFO) << "finish train lopq of " << coarse_center;
         } else {
-          //大家公用一个opq，直接旋转计算残差
+          //大家公用一个已读取到的opq，直接旋转计算残差
           LOG(INFO) << "no need train lopq use global one,R*r directly";
+          if(FLAGS_pq_minus_mean) {
+            vector<float> mu(D);
+            CHECK(fvecs_read(gopq_residual_mean_file.c_str(), D, 1, mu.data()) == 1);
+            minus_mu(D,coarse_doc_num[coarse_center],train_residual.data(),mu.data());
+          }
           float * r = new float[coarse_doc_num[coarse_center] * D];
           fmat_mul_full(global_o.get(), train_residual.data(), D, coarse_doc_num[coarse_center], D, "TN", r);
           memcpy(train_residual.data(),r,sizeof(float)*coarse_doc_num[coarse_center]*D);
