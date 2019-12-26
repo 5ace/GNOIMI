@@ -155,7 +155,7 @@ if (FLAGS_make_index) {
         pp = dynamic_cast<faiss::IndexIVFPQ *>(real_index);
         if(pp != nullptr) {
           //pp->do_polysemous_training=do_polysemous_training;
-          printf("this is a IndexIVFPQ, do_polysemous_training:%d\n",pp->do_polysemous_training);
+          printf("this is a IndexIVFPQ, do_polysemous_training:%d,use_precomputed_table:%d\n",pp->do_polysemous_training,pp->use_precomputed_table);
         } else {
           printf("this is not a  IndexIVFPQ\n");
         }

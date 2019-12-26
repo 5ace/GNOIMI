@@ -56,3 +56,9 @@ TARGET_LINK_LIBRARIES (kmeans yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
 #########################################################################################
 ADD_EXECUTABLE (test_matrix_perf test_matrix_perf.cpp)
 TARGET_LINK_LIBRARIES (test_matrix_perf yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (test_l2_ip test_l2_ip.cpp)
+TARGET_LINK_LIBRARIES (test_l2_ip yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )
+#########################################################################################
+ADD_EXECUTABLE (search_GNOIMI_deco search_GNOIMI_deco.cpp)
+TARGET_LINK_LIBRARIES (search_GNOIMI_deco yael ${LAPACK_LIBRARIES} libfaiss.a libglog.a )

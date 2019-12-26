@@ -3,6 +3,8 @@
 
 #include "tool/utils.h"
 #include <faiss/utils/distances.h>
+#include <faiss/utils/random.h>
+#include <faiss/utils/utils.h>
 #include <faiss/impl/HNSW.h>
 #include <gflags/gflags.h>
 #include <faiss/index_io.h>
