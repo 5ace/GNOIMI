@@ -641,6 +641,7 @@ struct Searcher {
 
     for(int qid = 0; qid < queriesCount; ++qid) {
       double t0 = elapsed();
+      float* dist = dists + qid * nprobe;
       float* query_residual = residuals.data() + qid * nprobe * D;
       int* candi_cell_id = cellids.data() + qid * nprobe;
     
@@ -733,7 +734,7 @@ struct Searcher {
         //z1 += (t2 - t1);
         //z2 += (t3 - t2);
         candi_cell_id[recall_doclist_num] = cell_id;
-        dists[recall_doclist_num] = scores[travesered_list_num].first;
+        dist[recall_doclist_num] = scores[travesered_list_num].first;
         ++recall_doclist_num;
       }
       recall_cell_num_for_each_query[qid] = recall_doclist_num; 
