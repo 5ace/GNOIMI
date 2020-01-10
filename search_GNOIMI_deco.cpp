@@ -30,11 +30,13 @@
 #include <gflags/gflags.h>
 #include <map>
 #include <faiss/index_io.h>
+#include "io.h"
 
 using std::cout;
 using std::ios;
 using std::string;
 using std::vector;
+using namespace mmu;
 using namespace gnoimi;
 
 //#define GNOIMI_QUERY_DEBUG
@@ -61,6 +63,7 @@ DEFINE_bool(residual_opq,true,"是否是对残差的opq,用原始向量训练一
 DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀,如果是空就不用lopq");
 DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
+DEFINE_bool(dump_mmu_model,false,"是否dump mmu model");
 
 
 std::vector<int> grouth_cellid;
@@ -117,9 +120,9 @@ struct Searcher {
   float* lopq_residual_mean = nullptr; //lopq的均值 K * D
   float* lopq_residual_mean_rotation = nullptr; //R * lopq_residual_mean for decomposition
   string model_prefix_,index_prefix_,pq_prefix_;
-  uint64_t D;
-  uint64_t K;
-  uint64_t M;
+  int D;
+  int K;
+  int M;
   int subDim;
   int rerankK;
   int threadsCount;
@@ -174,6 +177,15 @@ struct Searcher {
     ivf.resize(K*K);
     compute_table_docnum_threshold = 1.3 * rerankK;
     compute_table_docnum_threshold_term3 = 0;
+    if(FLAGS_dump_mmu_model)
+      SaveModelForMMU();
+    //LOG(INFO) << "alpha k2047:";
+    //gnoimi::print_elements(alpha + 2047*K,K);
+    //LOG(INFO)<<"lopq_residual_mean_rotation k2047:";
+    //gnoimi::print_elements(lopq_residual_mean_rotation + 2047 * D, D);
+    //LOG(INFO)<<"coarseFineProducts k2047:";
+    //gnoimi::print_elements(coarseFineProducts + 2047 * K, K);
+
     LOG(INFO) << "Searcher construct ok,is_lpq:"<< is_lpq <<",is_lopq:" << is_lopq <<", compute_table_docnum_threshold:"<< compute_table_docnum_threshold;
   }
   void LoadCellEdgesPart(int startId, int count) {
@@ -236,6 +248,23 @@ struct Searcher {
     cellEdges = (int*) malloc(K * K * sizeof(int));
     LoadCellEdges(K*K);
     return true;
+  }
+  void SaveModelForMMU() {
+    std::string model_path = lpq_file_prefix + "mmu.model"; 
+    std::ofstream ofs(model_path, std::ios::binary);
+    CHECK(ofs.is_open()) << "open model failed:" << model_path;
+    write_variable(ofs, D);
+    write_variable(ofs, K);
+    write_variable(ofs, M);
+    write_variable(ofs, rerankK);
+    write_vector(ofs, coarseVocab, K * D);
+    write_vector(ofs, fineVocab, K * D);
+    write_vector(ofs, alpha, K * K);
+    write_vector(ofs, lpqRerankVocabs, rerankK * D * K);
+    write_vector(ofs, lopqRerankRotation, D * D * K);
+    write_vector(ofs, lopq_residual_mean, K * D);
+    ofs.close();
+    LOG(INFO) << "out mmu model file:" << model_path;
   }
   bool ReadAndPrecomputeVocabsData() {
     CHECK(!access(coarseCodebookFilename.c_str(),0));
@@ -641,7 +670,7 @@ struct Searcher {
 
     for(int qid = 0; qid < queriesCount; ++qid) {
       double t0 = elapsed();
-      float* dist = dists + qid * nprobe;
+      float* dist = dists.data() + qid * nprobe;
       float* query_residual = residuals.data() + qid * nprobe * D;
       int* candi_cell_id = cellids.data() + qid * nprobe;
     
@@ -1209,9 +1238,11 @@ int main(int argc, char** argv) {
       }
       LOG(INFO) << " BASE file " << FLAGS_base_file <<", get docnum:" << searcher.docnum <<", d:" << file_d
         <<", resize pq codes:" << searcher.docnum * M;
+      size_t input_D = 0;
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
-         searcher.D, searcher.docnum, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
+         input_D, searcher.docnum, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
          std::placeholders::_2, std::placeholders::_3));
+      searcher.D = input_D;
       LOG(INFO) << "end index,read " << searcher.docnum << ",want " << FLAGS_N;
       searcher.SaveIndex();
       return 0;
