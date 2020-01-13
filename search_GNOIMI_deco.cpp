@@ -556,10 +556,10 @@ struct Searcher {
 
               if(is_lopq) {
                 /*
-                    d = || R * (x - y_C - mean) + y_R) ||^2
+                    d = || R * (x - y_C - mean) - y_R) ||^2
                       = || R * x - R * y_C  - (R * mean + y_R) ||^2 
                       = || x - y_C ||^2 + || R * mean +  y_R ||^2  + 2 * ( R * y_C | (y_R + R * mean)) - 2 * (R * x | y_R) - 2 * (R * x | R * mean)
-                         -------------   ------------------------------------------------------------    ----------------    ------------------- 
+                         -------------   ------------------------------------------------------------       -------------       ------------------- 
                             term1                        term2                                                term3               term4
                 */
                 std::vector<float> y_r(D);
@@ -860,7 +860,7 @@ struct Searcher {
 
     for(int qid = 0; qid < n; ++qid) {
         //针对每个pq建立一个距离表缓存
-        std::map<int,vector<float>> term3_table;
+        std::map<int,vector<float>> term34_table;
 
         result[qid].resize(neighborsCount, std::make_pair(std::numeric_limits<float>::max(), -1));
         float* query_residual = residuals.data() + qid * nprobe * D;
@@ -906,6 +906,10 @@ struct Searcher {
                   minus_mean(cell_residual,cell_id);
               }
               if(is_lopq) LopqMatrix(cell_residual, cell_residual, 1, cell_id);
+              // debug 
+              //LOG(INFO)<<"query nprobe i "<< i <<" cellid:" <<cell_id;
+              //gnoimi::print_elements(cell_residual, D);
+
               thread_local vector<float> table(M * rerankK);
               gnoimi::compute_distance_table(cell_residual, cellVocab, table.data(), M, subDim, rerankK);
               for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
@@ -924,7 +928,7 @@ struct Searcher {
                 ++found;
                 ++search_stats.table_dis_doc; 
               }
-          } else if (is_lopq && use_precomputed_table == 1 && (term3_table.count(GetCoarseIdFromCellId(cell_id)) > 0 
+          } else if (is_lopq && use_precomputed_table == 1 && (term34_table.count(GetCoarseIdFromCellId(cell_id)) > 0 
               || (cellFinish - cellStart > compute_table_docnum_threshold_term3 && neighborsCount - found >= compute_table_docnum_threshold_term3) )){
 
               float term1 = dists[i]; 
@@ -942,7 +946,8 @@ struct Searcher {
               */
               
               // 用分解
-              /* 验证 dis时才需要用到，需提前计算的
+              //* 验证 dis时才需要用到，需提前计算的
+              /*
               if(FLAGS_pq_minus_mean) {
                   minus_mean(cell_residual, cell_id);
               }
@@ -950,15 +955,16 @@ struct Searcher {
               vector<float> rx(D);
               LopqMatrix( x + qid * D, rx.data(), 1, cell_id);
               */
-              //如果之前计算过就复用以前的，否则重新计算term3的table
-              if(term3_table.count(GetCoarseIdFromCellId(cell_id)) == 0) {
+              //如果之前计算过就复用以前的，否则重新计算term3的table \ term4
+              if(term34_table.count(GetCoarseIdFromCellId(cell_id)) == 0) {
                   vector<float> rx(D);
                   LopqMatrix( x + qid * D, rx.data(), 1, cell_id);
-                  term3_table.emplace(std::piecewise_construct, std::forward_as_tuple(GetCoarseIdFromCellId(cell_id)), std::forward_as_tuple(rerankK * M));
-                  CHECK(term3_table[GetCoarseIdFromCellId(cell_id)].size() == rerankK * M);
-                  compute_inner_prod_table( rx.data(), term3_table[GetCoarseIdFromCellId(cell_id)].data(), cellVocab);
+                  term34_table.emplace(std::piecewise_construct, std::forward_as_tuple(GetCoarseIdFromCellId(cell_id)), std::forward_as_tuple(rerankK * M + 1)); // + 1多出来一个float存放term4
+                  compute_inner_prod_table( rx.data(), term34_table[GetCoarseIdFromCellId(cell_id)].data(), cellVocab);
+                  float term4 = faiss::fvec_inner_product(rx.data(), lopq_residual_mean_rotation + GetCoarseIdFromCellId(cell_id) * D, D);
+                  term34_table[GetCoarseIdFromCellId(cell_id)][rerankK * M] = term4;
               }
-              const vector<float> & table = term3_table[GetCoarseIdFromCellId(cell_id)];
+              const vector<float> & table = term34_table[GetCoarseIdFromCellId(cell_id)];
               for(int id = cellStart; id < cellFinish && found < neighborsCount; ++id) {
                 result[qid][found].second = index[id].pointId;
                 result[qid][found].first = 0.0f;
@@ -978,11 +984,9 @@ struct Searcher {
                   LOG(INFO) <<"term3:"<<sum0 + sum1 + sum2 + sum3 <<","<<faiss::fvec_inner_product(rx.data(),d.data(),D);
                 }
                 */
-                result[qid][found].first = term1 + index[id].term2 - 2 * (sum0 + sum1 + sum2 + sum3);
-                /*
-                {
+                result[qid][found].first = term1 + index[id].term2 - 2 * (sum0 + sum1 + sum2 + sum3) - 2 * table[rerankK * M];
+                /*{
                   // 验证 dis 
-                  float dis1 = result[qid][found].first -  2 * faiss::fvec_inner_product(rx.data(), lopq_residual_mean_rotation + GetCoarseIdFromCellId(cell_id) * D, D);
                   float dis2 = 0.0f;
                   for(size_t m = 0; m < M; ++m) {
                       float* codeword = cellVocab + m * rerankK * subDim + index[id].bytes[m] * subDim;
@@ -991,9 +995,8 @@ struct Searcher {
                   }
                   vector<float> r(D);
                   reconstruct(r.data(), bytes, cell_id);
-                  LOG(INFO) << "docid:"<< result[qid][found].second <<",decompostion dis1:"<<dis1<<",dis2:"<<dis2<<",dis3:"<<faiss::fvec_L2sqr(x, r.data(), D);
-                }
-                */
+                  LOG(INFO) << "docid:"<< result[qid][found].second <<",decompostion dis1:"<<result[qid][found].first<<",dis2:"<<dis2<<",dis3:"<<faiss::fvec_L2sqr(x, r.data(), D);
+                }*/
                 ++found;
                 ++search_stats.table_dis_doc; 
               }
@@ -1029,7 +1032,7 @@ struct Searcher {
         //  << empty_cell_num << " found " << found ;
         travel_doc += found;
         search_stats.nprobe += check_cell_num; 
-        search_stats.inner_table_num += term3_table.size();
+        search_stats.inner_table_num += term34_table.size();
     }
     double t2 = elapsed();
     #ifdef GNOIMI_QUERY_DEBUG
