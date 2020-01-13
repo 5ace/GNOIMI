@@ -574,6 +574,9 @@ struct Searcher {
                 LopqMatrix(y_c.data(), y_c.data(), 1, cell_id);
                 // save term2
                 term2[idx + i] = faiss::fvec_norm_L2sqr(y_r.data(),D) + 2 * faiss::fvec_inner_product(y_r.data(),y_c.data(), D); 
+                // debug
+                // LOG(INFO) <<"ADDindex query:"<<idx + i<<",cell_id:"<<cell_id<<",term2:"<<term2[idx + i]<<",dists:"<<dists[j][i];
+                // gnoimi::print_elements(&codes[(idx + i) * M],M);
               }
 
             }
@@ -850,6 +853,7 @@ struct Searcher {
     double t0 = elapsed();
     SearchIvf(n, x, L, nprobe, cellids, dists, residuals, recall_cell_num_for_each_query, true,start_id,neighborsCount);  
     double t1 = elapsed();
+
     //for(int i = 0; i < n; i++) {
     //  LOG(INFO) << "QueryIndex doc:" << start_id + i << ",search to cell:" << cellids[i*nprobe] << ",nprobe:"<<nprobe;
     //  if((start_id + i) % 10000 == 0) {
@@ -877,6 +881,7 @@ struct Searcher {
           int cell_id = candi_cell_id[i];
           int cellStart = (cell_id == 0) ? 0 : cellEdges[cell_id - 1];
           int cellFinish = cellEdges[cell_id];
+          LOG(INFO)<<"query nprobe i "<< i <<" cellid:" <<cell_id <<",dis:"<<dists[i];
 
           if(found >= neighborsCount) {
               break;
@@ -910,7 +915,6 @@ struct Searcher {
               }
               if(is_lopq) LopqMatrix(cell_residual, cell_residual, 1, cell_id);
               // debug 
-              //LOG(INFO)<<"query nprobe i "<< i <<" cellid:" <<cell_id;
               //gnoimi::print_elements(cell_residual, D);
 
               thread_local vector<float> table(M * rerankK);
@@ -1317,6 +1321,9 @@ int main(int argc, char** argv) {
       results[i]  = result[0];
       LOG(INFO) << "query finish " << i << ", result:" << result[0][0].second;
     }
+    // debug
+    //searcher.AddIndex(FLAGS_L,queriesCount,queries.get(),0);
+
 
     double t1 = elapsed();
     std::cout.setf(ios::fixed);//precision控制小数点后的位数
