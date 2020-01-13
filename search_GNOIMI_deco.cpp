@@ -639,7 +639,7 @@ struct Searcher {
   */
   bool SearchIvf(uint64_t queriesCount, float *queries, uint64_t L, int &nprobe, vector<int> &cellids,
       vector<float>& dists, vector<float> &residuals, 
-      vector<int> &recall_cell_num_for_each_query, bool is_filter_empty_cell = false,
+      vector<int> &recall_cell_num_for_each_query, bool is_query = false,
       uint64_t start_id = 0, uint64_t neighborsCount = 0xFFFFFFFFUL) {
     if(nprobe > L * K || nprobe <= 0) {
       nprobe = L * K;
@@ -718,9 +718,11 @@ struct Searcher {
                               - queryFineDistance[k] * alphaFactor + coarseFineProducts[cell_id] * alphaFactor);
           scores[l*K+k].second = cell_id;
         }
-        memcpy(coarseResiduals.data() + l * D, coarseVocab + D * coarseId, D * sizeof(float));
-        // 记录一级码本的残差 q-S
-        fvec_rev_sub(coarseResiduals.data() + l * D, queries + qid * D, D);
+        if(is_query==false) {
+          memcpy(coarseResiduals.data() + l * D, coarseVocab + D * coarseId, D * sizeof(float));
+          // 记录一级码本的残差 q-S
+          fvec_rev_sub(coarseResiduals.data() + l * D, queries + qid * D, D);
+        }
         // 拷贝前L个倒排链的PQ的码本
         //memcpy(preallocatedVocabs + l * rerankK * D, searcher.rerankVocabs + coarseId * rerankK * D, rerankK * D * sizeof(float));
       }
@@ -739,9 +741,9 @@ struct Searcher {
         //得到cellid
         int cell_id = scores[travesered_list_num].second;
 
-        if(is_filter_empty_cell == true) {
+        if(is_query == true) {
           int last = (cell_id == 0 ? 0 : cellEdges[cell_id-1]);
-          //是query情形
+          //是query情形,过滤空doclist
           if(recall_doc_num >= neighborsCount) {
             break;
           }
@@ -750,15 +752,16 @@ struct Searcher {
           }
           recall_doc_num += (cellEdges[cell_id] - last);
         }
-
+        if(is_query == false) { // query的时候且用分解式计算最终距离的时候，不计算残差
         int topListId = coarseIdToTopId[cell_id / K]; //得到这个cellid对应的粗排的顺序
-        //拷贝p-S
-        //double t1 = elapsed();
-        memcpy(query_residual + recall_doclist_num * D , coarseResiduals.data() + topListId * D, D * sizeof(float));
-        //double t2 = elapsed();
-        //residual = p -S - alpha*T
-        //cblas_saxpy(D, -1.0 * alpha[cell_id], fineVocab + (cell_id % K) * D, 1, query_residual + recall_doclist_num * D, 1);
-        faiss::fvec_madd(D, query_residual + recall_doclist_num * D, -1.0 * alpha[cell_id], fineVocab + (cell_id % K) * D, query_residual + recall_doclist_num * D);
+          //拷贝p-S
+          //double t1 = elapsed();
+          memcpy(query_residual + recall_doclist_num * D , coarseResiduals.data() + topListId * D, D * sizeof(float));
+          //double t2 = elapsed();
+          //residual = p -S - alpha*T
+          //cblas_saxpy(D, -1.0 * alpha[cell_id], fineVocab + (cell_id % K) * D, 1, query_residual + recall_doclist_num * D, 1);
+          faiss::fvec_madd(D, query_residual + recall_doclist_num * D, -1.0 * alpha[cell_id], fineVocab + (cell_id % K) * D, query_residual + recall_doclist_num * D);
+        }
         //double t3 = elapsed();
         //z1 += (t2 - t1);
         //z2 += (t3 - t2);
@@ -945,7 +948,6 @@ struct Searcher {
               }
               */
               
-              // 用分解
               //* 验证 dis时才需要用到，需提前计算的
               /*
               if(FLAGS_pq_minus_mean) {
@@ -955,6 +957,7 @@ struct Searcher {
               vector<float> rx(D);
               LopqMatrix( x + qid * D, rx.data(), 1, cell_id);
               */
+              // 用分解
               //如果之前计算过就复用以前的，否则重新计算term3的table \ term4
               if(term34_table.count(GetCoarseIdFromCellId(cell_id)) == 0) {
                   vector<float> rx(D);
@@ -986,6 +989,9 @@ struct Searcher {
                 */
                 result[qid][found].first = term1 + index[id].term2 - 2 * (sum0 + sum1 + sum2 + sum3) - 2 * table[rerankK * M];
                 /*{
+                  // NOTICE:如果用分解式计算距离，query的时候不需要计算残差，searchIVF为了加快计算可能没有返回残差所以如果需要debug
+                  // 计算dis2 则需要修改一下返回残差
+
                   // 验证 dis 
                   float dis2 = 0.0f;
                   for(size_t m = 0; m < M; ++m) {
