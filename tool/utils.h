@@ -372,6 +372,15 @@ void print_elements (char* start, size_t n) {
   ss<<"]";
   LOG(INFO) << ss.str();
 }
+void print_elements (uint8_t* start, size_t n) {
+  std::stringstream ss;
+  ss << "[";
+  for(size_t i = 0; i < n; i++) {
+    ss << (int)start[i] << (i==n-1 ? "":",");
+  }
+  ss<<"]";
+  LOG(INFO) << ss.str();
+}
 template<typename T>
 void print_elements(const T* start, size_t n) {
   std::stringstream ss;

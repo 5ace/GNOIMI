@@ -53,6 +53,7 @@ DEFINE_int32(lopq_train_coarse_start,-1,"可选值0,..K-1,-1 means all");
 DEFINE_int32(lopq_train_coarse_end,-1,"可选值1,..K,-1 means all 主要为了分布式计算,[lopq_train_coarse_start,lopq_train_coarse_end)");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀，最好单独放到一个目录下");
 DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
+DEFINE_bool(normalize_before_train,true,"is normalize read train fvecs");
 
 size_t D;
 int K;
@@ -570,7 +571,7 @@ int main(int argc, char** argv) {
     learnFilename = FLAGS_learnFilename; 
     D = FLAGS_d;
     totalLearnCount = FLAGS_n;
-    std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount, true); 
+    std::shared_ptr<float> features = gnoimi::read_bfvecs(learnFilename.c_str(), D,  totalLearnCount, FLAGS_normalize_before_train); 
     // 初始化全局变量
     init_global_varibles();
     // 读取训练向量

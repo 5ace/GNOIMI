@@ -64,6 +64,7 @@ DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀,如果是空就不用lopq");
 DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
 DEFINE_bool(dump_mmu_model,false,"是否dump mmu model");
+DEFINE_bool(normalize_before_read,true,"读取索引和查询是否归一化");
 
 
 std::vector<int> grouth_cellid;
@@ -1254,7 +1255,7 @@ int main(int argc, char** argv) {
       size_t input_D = 0;
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
          input_D, searcher.docnum, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
-         std::placeholders::_2, std::placeholders::_3));
+         std::placeholders::_2, std::placeholders::_3),FLAGS_normalize_before_read);
       searcher.D = input_D;
       LOG(INFO) << "end index,read " << searcher.docnum << ",want " << FLAGS_N;
       searcher.SaveIndex();
@@ -1266,7 +1267,7 @@ int main(int argc, char** argv) {
 
     // 读取query
     uint64_t queriesCount = FLAGS_queriesCount;
-    auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,true);
+    auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,FLAGS_normalize_before_read);
     LOG(INFO) << "L2 norm " << faiss::fvec_norm_L2sqr(queries.get(), FLAGS_D);
     LOG(INFO) << "read "<< queriesCount <<" doc from " << FLAGS_query_filename << ", d:" << FLAGS_D;
 
@@ -1319,7 +1320,7 @@ int main(int argc, char** argv) {
       vector<vector<std::pair<float, int> > > result;
       search_stats.travel_doc += searcher.SearchNearestNeighbors(queries.get() + i * FLAGS_D, 1, FLAGS_L, nprobe ,FLAGS_neighborsCount, result, i, FLAGS_topk);
       results[i]  = result[0];
-      LOG(INFO) << "query finish " << i << ", result:" << result[0][0].second;
+      LOG(INFO) << "query finish " << i << ", dis:"<< result[0][0].first <<",docid:" << result[0][0].second;
     }
     // debug
     //searcher.AddIndex(FLAGS_L,queriesCount,queries.get(),0);

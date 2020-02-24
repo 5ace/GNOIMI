@@ -58,6 +58,7 @@ DEFINE_bool(residual_opq,true,"是否是对残差的opq,用原始向量训练一
 DEFINE_bool(print_gt_in_LK,true,"是否输出gt在粗排中的命中率");
 DEFINE_string(lpq_file_prefix,"","lpq输出的多个opq pq faisspq的文件名前缀,如果是空就不用lopq");
 DEFINE_bool(pq_minus_mean,false,"是否在pq或opq之前减去均值");
+DEFINE_bool(normalize_before_read,true,"读取索引和查询是否归一化");
 
 
 std::vector<int> grouth_cellid;
@@ -1003,7 +1004,7 @@ int main(int argc, char** argv) {
         <<", resize pq codes:" << searcher.docnum * M;
       gnoimi::b2fvecs_read_callback(FLAGS_base_file.c_str(),
          searcher.D, searcher.docnum, 1000000,std::bind(&Searcher::AddIndex, &searcher, FLAGS_L, std::placeholders::_1, 
-         std::placeholders::_2, std::placeholders::_3));
+         std::placeholders::_2, std::placeholders::_3),FLAGS_normalize_before_read);
       LOG(INFO) << "end index,read " << searcher.docnum << ",want " << FLAGS_N;
       searcher.SaveIndex();
       return 0;
@@ -1014,7 +1015,7 @@ int main(int argc, char** argv) {
 
     // 读取query
     uint64_t queriesCount = FLAGS_queriesCount;
-    auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,true);
+    auto queries =  gnoimi::read_bfvecs(FLAGS_query_filename.c_str(), FLAGS_D, queriesCount,FLAGS_normalize_before_read);
     LOG(INFO) << "L2 norm " << faiss::fvec_norm_L2sqr(queries.get(), FLAGS_D);
     LOG(INFO) << "read "<< queriesCount <<" doc from " << FLAGS_query_filename << ", d:" << FLAGS_D;
 

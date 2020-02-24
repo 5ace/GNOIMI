@@ -33,6 +33,7 @@ DEFINE_string(coarse_centriods_file,"","coarse_centriods_file");
 DEFINE_string(residual_centriods_file,"","residul_centriods_file");
 DEFINE_bool(use_yael,false,"use yael for kmeans");
 DEFINE_int32(iter_num,100000,"iter_num for kmeans");
+DEFINE_bool(normalize_before_train,true,"is normalize read fvecs");
 
 
 int main(int argc, char** argv) {
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
     CHECK(!f_file_list.empty() && !coarseFile_name.empty() && !fineFile_name.empty() && k > 0 && d>=0 && n>=0);
     
     // read train vectors
-    std::shared_ptr<float> features = read_bfvecs(f_file_list, d,  n, true); 
+    std::shared_ptr<float> features = read_bfvecs(f_file_list, d,  n, FLAGS_normalize_before_train); 
 
     LOG(INFO) << " load " << n << " vecs from " << f_file_list << " dim " << d;
     LOG(INFO) << "train vec Squared L2 norm " << faiss::fvec_norm_L2sqr(features.get(),d);
