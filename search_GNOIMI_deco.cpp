@@ -178,8 +178,12 @@ struct Searcher {
     ivf.resize(K*K);
     compute_table_docnum_threshold = 1.3 * rerankK;
     compute_table_docnum_threshold_term3 = 0;
-    if(FLAGS_dump_mmu_model)
+    LOG(INFO) << "Searcher construct ok,is_lpq:"<< is_lpq <<",is_lopq:" << is_lopq <<", compute_table_docnum_threshold:"<< compute_table_docnum_threshold;
+    if(FLAGS_dump_mmu_model) {
       SaveModelForMMU();
+      LOG(INFO) << "finish save model exit~";
+      exit(0);
+    }
     //LOG(INFO) << "alpha k2047:";
     //gnoimi::print_elements(alpha + 2047*K,K);
     //LOG(INFO)<<"lopq_residual_mean_rotation k2047:";
@@ -187,7 +191,6 @@ struct Searcher {
     //LOG(INFO)<<"coarseFineProducts k2047:";
     //gnoimi::print_elements(coarseFineProducts + 2047 * K, K);
 
-    LOG(INFO) << "Searcher construct ok,is_lpq:"<< is_lpq <<",is_lopq:" << is_lopq <<", compute_table_docnum_threshold:"<< compute_table_docnum_threshold;
   }
   void LoadCellEdgesPart(int startId, int count) {
     std::ifstream inputCellEdges(cellEdgesFilename.c_str(), ios::binary | ios::in);
